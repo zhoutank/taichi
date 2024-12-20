@@ -1,7 +1,11 @@
+import pytest
+from taichi.lang import impl
+
 import taichi as ti
+from tests import test_utils
 
 
-@ti.test(require=ti.extension.sparse)
+@test_utils.test(require=ti.extension.sparse, exclude=ti.metal)
 def test_compare_basics():
     a = ti.field(ti.i32)
     ti.root.dynamic(ti.i, 256).place(a)
@@ -40,7 +44,7 @@ def test_compare_basics():
     assert a[11]
 
 
-@ti.test(require=ti.extension.sparse)
+@test_utils.test(require=ti.extension.sparse, exclude=ti.metal)
 def test_compare_equality():
     a = ti.field(ti.i32)
     ti.root.dynamic(ti.i, 256).place(a)
@@ -79,7 +83,7 @@ def test_compare_equality():
     assert not a[11]
 
 
-@ti.test(require=ti.extension.sparse)
+@test_utils.test(require=ti.extension.sparse, exclude=[ti.metal])
 def test_no_duplicate_eval():
     a = ti.field(ti.i32)
     ti.root.dynamic(ti.i, 256).place(a)
@@ -94,7 +98,7 @@ def test_no_duplicate_eval():
     assert a[2]  # ti.append returns 0
 
 
-@ti.test()
+@test_utils.test()
 def test_no_duplicate_eval_func():
     a = ti.field(ti.i32, ())
     b = ti.field(ti.i32, ())
@@ -104,7 +108,8 @@ def test_no_duplicate_eval_func():
         return ti.atomic_add(b[None], n)
 
     def foo(n):
-        return ti.atomic_add(ti.subscript(b, None), n)
+        ast_builder = impl.get_runtime().compiling_callable.ast_builder()
+        return ti.atomic_add(impl.subscript(ast_builder, b, None), n)
 
     @ti.kernel
     def func():
@@ -115,7 +120,7 @@ def test_no_duplicate_eval_func():
     assert b[None] == 2
 
 
-@ti.test(require=ti.extension.sparse)
+@test_utils.test(require=ti.extension.sparse, exclude=ti.metal)
 def test_chain_compare():
     a = ti.field(ti.i32)
     ti.root.dynamic(ti.i, 256).place(a)
@@ -128,10 +133,62 @@ def test_chain_compare():
         b[None] = 2
         c[None] = 3
         d[None] = 3
-        a[0] = c[None] == d[None] != b[None] < d[None] > b[None] >= b[
-            None] <= c[None]
+        a[0] = c[None] == d[None] != b[None] < d[None] > b[None] >= b[None] <= c[None]
         a[1] = b[None] <= c[None] != d[None] > b[None] == b[None]
 
     func()
     assert a[0]
     assert not a[1]
+
+
+@test_utils.test()
+def test_static_in():
+    @ti.kernel
+    def foo(a: ti.template()) -> ti.i32:
+        b = 0
+        if ti.static(a in [ti.i32, ti.u32]):
+            b = 1
+        elif ti.static(a not in [ti.f32, ti.f64]):
+            b = 2
+        return b
+
+    assert foo(ti.u32) == 1
+    assert foo(ti.i64) == 2
+    assert foo(ti.f32) == 0
+
+
+@test_utils.test()
+def test_non_static_in():
+    with pytest.raises(ti.TaichiCompilationError, match='"In" is only supported inside `ti.static`.'):
+
+        @ti.kernel
+        def foo(a: ti.template()) -> ti.i32:
+            b = 0
+            if a in [ti.i32, ti.u32]:
+                b = 1
+            return b
+
+        foo(ti.i32)
+
+
+@test_utils.test(default_ip=ti.i64, require=ti.extension.data64)
+def test_compare_ret_type():
+    # The purpose of this test is to make sure a comparison returns i32
+    # regardless of default_ip so that it can always serve as the condition of
+    # an if/while statement.
+    @ti.kernel
+    def foo():
+        for i in range(100):
+            if i == 0:
+                pass
+        i = 100
+        while i != 0:
+            i -= 1
+
+    foo()
+
+
+@test_utils.test()
+def test_python_scope_compare():
+    v = ti.math.vec3(0, 1, 2)
+    assert (v < 1)[0] == 1

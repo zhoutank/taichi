@@ -1,7 +1,8 @@
 import taichi as ti
+from tests import test_utils
 
 
-@ti.test()
+@test_utils.test()
 def test_empty():
     @ti.kernel
     def func():
@@ -10,11 +11,12 @@ def test_empty():
     func()
 
 
-@ti.test()
+@test_utils.test()
 def test_empty_args():
     @ti.kernel
-    def func(x: ti.i32, arr: ti.ext_arr()):
+    def func(x: ti.i32, arr: ti.types.ndarray()):
         pass
 
     import numpy as np
+
     func(42, np.arange(10, dtype=np.float32))

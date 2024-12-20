@@ -4,7 +4,7 @@
 #include "taichi/ir/visitors.h"
 #include "taichi/system/profiler.h"
 
-TLANG_NAMESPACE_BEGIN
+namespace taichi::lang {
 
 namespace {
 
@@ -16,7 +16,7 @@ class RemoveLoopUnique : public BasicStmtVisitor {
   DelayedIRModifier modifier;
 
   void visit(LoopUniqueStmt *stmt) override {
-    stmt->replace_with(stmt->input);
+    stmt->replace_usages_with(stmt->input);
     modifier.erase(stmt);
   }
 
@@ -38,4 +38,4 @@ bool remove_loop_unique(IRNode *root) {
 
 }  // namespace irpass
 
-TLANG_NAMESPACE_END
+}  // namespace taichi::lang

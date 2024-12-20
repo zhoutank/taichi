@@ -3,10 +3,13 @@ import os
 import pytest
 
 import taichi as ti
-from taichi import approx
+from tests import test_utils
 
 
-def run_mpm88_test():
+@pytest.mark.skipif(os.environ.get("TI_LITE_TEST") or "0", reason="Lite test")
+@pytest.mark.run_in_serial
+@test_utils.test()
+def test_mpm88():
     dim = 2
     N = 64
     n_particles = N * N
@@ -14,7 +17,7 @@ def run_mpm88_test():
     dx = 1 / n_grid
     inv_dx = 1 / dx
     dt = 2.0e-4
-    p_vol = (dx * 0.5)**2
+    p_vol = (dx * 0.5) ** 2
     p_rho = 1
     p_mass = p_vol * p_rho
     E = 400
@@ -31,7 +34,7 @@ def run_mpm88_test():
         for p in x:
             base = (x[p] * inv_dx - 0.5).cast(int)
             fx = x[p] * inv_dx - base.cast(float)
-            w = [0.5 * (1.5 - fx)**2, 0.75 - (fx - 1)**2, 0.5 * (fx - 0.5)**2]
+            w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
             stress = -dt * p_vol * (J[p] - 1) * 4 * inv_dx * inv_dx * E
             affine = ti.Matrix([[stress, 0], [0, stress]]) + p_mass * C[p]
             for i in ti.static(range(3)):
@@ -39,9 +42,8 @@ def run_mpm88_test():
                     offset = ti.Vector([i, j])
                     dpos = (offset.cast(float) - fx) * dx
                     weight = w[i][0] * w[j][1]
-                    grid_v[base + offset].atomic_add(
-                        weight * (p_mass * v[p] + affine @ dpos))
-                    grid_m[base + offset].atomic_add(weight * p_mass)
+                    ti.atomic_add(grid_v[base + offset], weight * (p_mass * v[p] + affine @ dpos))
+                    ti.atomic_add(grid_m[base + offset], weight * p_mass)
 
         for i, j in grid_m:
             if grid_m[i, j] > 0:
@@ -61,9 +63,7 @@ def run_mpm88_test():
         for p in x:
             base = (x[p] * inv_dx - 0.5).cast(int)
             fx = x[p] * inv_dx - base.cast(float)
-            w = [
-                0.5 * (1.5 - fx)**2, 0.75 - (fx - 1.0)**2, 0.5 * (fx - 0.5)**2
-            ]
+            w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
             new_v = ti.Vector.zero(ti.f32, 2)
             new_C = ti.Matrix.zero(ti.f32, 2, 2)
             for i in ti.static(range(3)):
@@ -77,9 +77,6 @@ def run_mpm88_test():
             x[p] += dt * v[p]
             J[p] *= 1 + dt * new_C.trace()
             C[p] = new_C
-
-    # gui = ti.core.GUI("MPM88", ti.veci(512, 512))
-    # canvas = gui.get_canvas()
 
     for i in range(n_particles):
         x[i] = [i % N / N * 0.4 + 0.2, i / N / N * 0.4 + 0.05]
@@ -101,32 +98,18 @@ def run_mpm88_test():
         0.07810827,
     ]
     for i in range(4):
-        assert (pos**(i + 1)).mean() == approx(regression[i], rel=1e-2)
-
-
-@ti.test()
-def test_mpm88():
-    run_mpm88_test()
+        assert (pos ** (i + 1)).mean() == test_utils.approx(regression[i], rel=1e-2)
 
 
 def _is_appveyor():
     # AppVeyor adds `APPVEYOR=True` ('true' on Ubuntu)
     # https://www.appveyor.com/docs/environment-variables/
-    return os.getenv('APPVEYOR', '').lower() == 'true'
+    return os.getenv("APPVEYOR", "").lower() == "true"
 
 
-#TODO: Remove exclude of ti.metal
-@pytest.mark.skipif(_is_appveyor(), reason='Stuck on Appveyor.')
-@ti.test(require=ti.extension.async_mode, exclude=[ti.metal], async_mode=True)
-def test_mpm88_async():
-    # It seems that all async tests on Appveyor run super slow. For example,
-    # on Appveyor, 10+ tests have passed during the execution of
-    # test_fuse_dense_x2y2z. Maybe thread synchronizations are expensive?
-    run_mpm88_test()
-
-
-# TODO: enable opengl
-@ti.test(arch=[ti.cpu, ti.cuda])
+@pytest.mark.skipif(os.environ.get("TI_LITE_TEST") or "0", reason="Lite test")
+@pytest.mark.run_in_serial
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.opengl])
 def test_mpm88_numpy_and_ndarray():
     import numpy as np
 
@@ -137,19 +120,24 @@ def test_mpm88_numpy_and_ndarray():
     dx = 1 / n_grid
     inv_dx = 1 / dx
     dt = 2.0e-4
-    p_vol = (dx * 0.5)**2
+    p_vol = (dx * 0.5) ** 2
     p_rho = 1
     p_mass = p_vol * p_rho
     E = 400
 
     @ti.kernel
-    def substep(x: ti.any_arr(element_dim=1), v: ti.any_arr(element_dim=1),
-                C: ti.any_arr(element_dim=2), J: ti.any_arr(),
-                grid_v: ti.any_arr(element_dim=1), grid_m: ti.any_arr()):
+    def substep(
+        x: ti.types.ndarray(dtype=ti.math.vec2),
+        v: ti.types.ndarray(dtype=ti.math.vec2),
+        C: ti.types.ndarray(dtype=ti.math.mat2),
+        J: ti.types.ndarray(),
+        grid_v: ti.types.ndarray(dtype=ti.math.vec2),
+        grid_m: ti.types.ndarray(),
+    ):
         for p in x:
             base = (x[p] * inv_dx - 0.5).cast(int)
             fx = x[p] * inv_dx - base.cast(float)
-            w = [0.5 * (1.5 - fx)**2, 0.75 - (fx - 1)**2, 0.5 * (fx - 0.5)**2]
+            w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
             stress = -dt * p_vol * (J[p] - 1) * 4 * inv_dx * inv_dx * E
             affine = ti.Matrix([[stress, 0], [0, stress]]) + p_mass * C[p]
             for i in ti.static(range(3)):
@@ -157,9 +145,8 @@ def test_mpm88_numpy_and_ndarray():
                     offset = ti.Vector([i, j])
                     dpos = (offset.cast(float) - fx) * dx
                     weight = w[i][0] * w[j][1]
-                    grid_v[base + offset].atomic_add(
-                        weight * (p_mass * v[p] + affine @ dpos))
-                    grid_m[base + offset].atomic_add(weight * p_mass)
+                    ti.atomic_add(grid_v[base + offset], weight * (p_mass * v[p] + affine @ dpos))
+                    ti.atomic_add(grid_m[base + offset], weight * p_mass)
 
         for i, j in grid_m:
             if grid_m[i, j] > 0:
@@ -179,9 +166,7 @@ def test_mpm88_numpy_and_ndarray():
         for p in x:
             base = (x[p] * inv_dx - 0.5).cast(int)
             fx = x[p] * inv_dx - base.cast(float)
-            w = [
-                0.5 * (1.5 - fx)**2, 0.75 - (fx - 1.0)**2, 0.5 * (fx - 0.5)**2
-            ]
+            w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
             new_v = ti.Vector.zero(ti.f32, 2)
             new_C = ti.Matrix.zero(ti.f32, 2, 2)
             for i in ti.static(range(3)):
@@ -217,7 +202,7 @@ def test_mpm88_numpy_and_ndarray():
             0.07810827,
         ]
         for i in range(4):
-            assert (pos**(i + 1)).mean() == approx(regression[i], rel=1e-2)
+            assert (pos ** (i + 1)).mean() == test_utils.approx(regression[i], rel=1e-2)
 
     def test_numpy():
         x = np.zeros((n_particles, dim), dtype=np.float32)

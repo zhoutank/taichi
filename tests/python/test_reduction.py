@@ -3,6 +3,7 @@ import pytest
 from pytest import approx
 
 import taichi as ti
+from tests import test_utils
 
 OP_ADD = 0
 OP_MIN = 1
@@ -17,7 +18,7 @@ ti_ops = {
     OP_MAX: ti.atomic_max,
     OP_AND: ti.atomic_and,
     OP_OR: ti.atomic_or,
-    OP_XOR: ti.atomic_xor
+    OP_XOR: ti.atomic_xor,
 }
 
 np_ops = {
@@ -26,14 +27,19 @@ np_ops = {
     OP_MAX: lambda a: a.max(),
     OP_AND: np.bitwise_and.reduce,
     OP_OR: np.bitwise_or.reduce,
-    OP_XOR: np.bitwise_xor.reduce
+    OP_XOR: np.bitwise_xor.reduce,
 }
 
 
 def _test_reduction_single(dtype, criterion, op):
     N = 1024 * 1024
-    if (ti.cfg.arch == ti.opengl
-            or ti.cfg.arch == ti.vulkan) and dtype == ti.f32:
+    if (
+        ti.lang.impl.current_cfg().arch == ti.opengl
+        or ti.lang.impl.current_cfg().arch == ti.vulkan
+        or ti.lang.impl.current_cfg().arch == ti.metal
+        or ti.lang.impl.current_cfg().arch == ti.gles
+        or ti.lang.impl.current_cfg().arch == ti.dx11
+    ) and dtype == ti.f32:
         # OpenGL/Vulkan are not capable of such large number in its float32...
         N = 1024 * 16
 
@@ -46,6 +52,7 @@ def _test_reduction_single(dtype, criterion, op):
         def fill():
             for i in a:
                 a[i] = i + 0.5
+
     else:
 
         @ti.kernel
@@ -79,43 +86,43 @@ def _test_reduction_single(dtype, criterion, op):
     assert criterion(tot2, ground_truth)
 
 
-@pytest.mark.parametrize('op', [OP_ADD, OP_MIN, OP_MAX, OP_AND, OP_OR, OP_XOR])
-@ti.all_archs
+@pytest.mark.parametrize("op", [OP_ADD, OP_MIN, OP_MAX, OP_AND, OP_OR, OP_XOR])
+@test_utils.test()
 def test_reduction_single_i32(op):
-    _test_reduction_single(ti.i32, lambda x, y: x % 2**32 == y % 2**32, op)
+    _test_reduction_single(ti.i32, lambda x, y: int(x) % 2**32 == int(y) % 2**32, op)
 
 
-@pytest.mark.parametrize('op', [OP_ADD])
-@ti.test(exclude=ti.opengl)
+@pytest.mark.parametrize("op", [OP_ADD])
+@test_utils.test(exclude=[ti.opengl, ti.gles])
 def test_reduction_single_u32(op):
-    _test_reduction_single(ti.u32, lambda x, y: x % 2**32 == y % 2**32, op)
+    _test_reduction_single(ti.u32, lambda x, y: int(x) % 2**32 == int(y) % 2**32, op)
 
 
-@pytest.mark.parametrize('op', [OP_ADD, OP_MIN, OP_MAX])
-@ti.all_archs
+@pytest.mark.parametrize("op", [OP_ADD, OP_MIN, OP_MAX])
+@test_utils.test()
 def test_reduction_single_f32(op):
     _test_reduction_single(ti.f32, lambda x, y: x == approx(y, 3e-4), op)
 
 
-@pytest.mark.parametrize('op', [OP_ADD])
-@ti.test(require=ti.extension.data64)
+@pytest.mark.parametrize("op", [OP_ADD])
+@test_utils.test(require=ti.extension.data64)
 def test_reduction_single_i64(op):
-    _test_reduction_single(ti.i64, lambda x, y: x % 2**64 == y % 2**64, op)
+    _test_reduction_single(ti.i64, lambda x, y: int(x) % 2**64 == int(y) % 2**64, op)
 
 
-@pytest.mark.parametrize('op', [OP_ADD])
-@ti.test(exclude=ti.opengl, require=ti.extension.data64)
+@pytest.mark.parametrize("op", [OP_ADD])
+@test_utils.test(exclude=[ti.opengl, ti.gles], require=ti.extension.data64)
 def test_reduction_single_u64(op):
-    _test_reduction_single(ti.u64, lambda x, y: x % 2**64 == y % 2**64, op)
+    _test_reduction_single(ti.u64, lambda x, y: int(x) % 2**64 == int(y) % 2**64, op)
 
 
-@pytest.mark.parametrize('op', [OP_ADD])
-@ti.test(require=ti.extension.data64)
+@pytest.mark.parametrize("op", [OP_ADD])
+@test_utils.test(require=ti.extension.data64)
 def test_reduction_single_f64(op):
     _test_reduction_single(ti.f64, lambda x, y: x == approx(y, 1e-12), op)
 
 
-@ti.test()
+@test_utils.test()
 def test_reduction_different_scale():
     @ti.kernel
     def func(n: ti.template()) -> ti.i32:
@@ -130,10 +137,23 @@ def test_reduction_different_scale():
         assert n == func(n)
 
 
-@ti.test()
-def test_reduction_any_arr():
+@test_utils.test()
+def test_reduction_non_full_warp():
     @ti.kernel
-    def reduce(a: ti.any_arr()) -> ti.i32:
+    def test() -> ti.i32:
+        hit_time = 1
+        ti.loop_config(block_dim=8)
+        for i in range(8):
+            ti.atomic_min(hit_time, 1)
+        return hit_time
+
+    assert test() == 1
+
+
+@test_utils.test()
+def test_reduction_ndarray():
+    @ti.kernel
+    def reduce(a: ti.types.ndarray()) -> ti.i32:
         s = 0
         for i in a:
             ti.atomic_add(s, a[i])

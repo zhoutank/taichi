@@ -18,7 +18,7 @@
 #pragma warning(pop)
 #endif
 
-TI_NAMESPACE_BEGIN
+namespace taichi {
 
 #define TIME(x)                                                      \
   {                                                                  \
@@ -31,7 +31,7 @@ TI_NAMESPACE_BEGIN
 
 #include <stdint.h>
 
-class Time {
+class TI_DLL_EXPORT Time {
  public:
   static double get_time();
   static uint64 get_cycles();
@@ -57,7 +57,7 @@ class Time {
     bool have_output;
 
    public:
-    Timer(std::string name);
+    explicit Timer(std::string name);
 
     Timer() {
     }
@@ -69,14 +69,16 @@ class Time {
 
   class TickTimer : public Timer {
    protected:
-    double get_time();
+    double get_time() override;
 
-    void print_record(const char *left, double elapsed, double average);
+    void print_record(const char *left,
+                      double elapsed,
+                      double average) override;
 
    public:
-    TickTimer(std::string name);
+    explicit TickTimer(std::string name);
 
-    ~TickTimer() {
+    ~TickTimer() override {
       output();
     }
   };
@@ -103,4 +105,4 @@ class Time {
   };
 };
 
-TI_NAMESPACE_END
+}  // namespace taichi

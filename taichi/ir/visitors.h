@@ -1,7 +1,7 @@
 #pragma once
 #include "taichi/ir/ir.h"
 
-TLANG_NAMESPACE_BEGIN
+namespace taichi::lang {
 
 // Visits all non-containing statements
 class BasicStmtVisitor : public IRVisitor {
@@ -25,8 +25,6 @@ class BasicStmtVisitor : public IRVisitor {
 
   void visit(OffloadedStmt *stmt) override;
 
-  void visit(FuncBodyStmt *stmt) override;
-
   void visit(FrontendWhileStmt *stmt) override;
 
   void visit(FrontendForStmt *stmt) override;
@@ -34,4 +32,4 @@ class BasicStmtVisitor : public IRVisitor {
   void visit(FrontendIfStmt *stmt) override;
 };
 
-TLANG_NAMESPACE_END
+}  // namespace taichi::lang

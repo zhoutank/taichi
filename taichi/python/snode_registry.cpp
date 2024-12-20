@@ -1,12 +1,16 @@
 #include "taichi/python/snode_registry.h"
 
+#include "taichi/common/logging.h"
 #include "taichi/ir/snode.h"
+#include "taichi/program/program.h"
 
-namespace taichi {
-namespace lang {
+namespace taichi::lang {
 
-SNode *SNodeRegistry::create_root() {
-  auto n = std::make_unique<SNode>(/*depth=*/0, SNodeType::root);
+SNode *SNodeRegistry::create_root(Program *prog) {
+  TI_ASSERT(prog != nullptr);
+  auto n = std::make_unique<SNode>(/*depth=*/0, SNodeType::root,
+                                   prog->get_snode_to_fields(),
+                                   &prog->get_snode_rw_accessors_bank());
   auto *res = n.get();
   snodes_.push_back(std::move(n));
   return res;
@@ -23,5 +27,4 @@ std::unique_ptr<SNode> SNodeRegistry::finalize(const SNode *snode) {
   return nullptr;
 }
 
-}  // namespace lang
-}  // namespace taichi
+}  // namespace taichi::lang

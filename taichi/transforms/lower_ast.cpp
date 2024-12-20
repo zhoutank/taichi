@@ -8,16 +8,16 @@
 
 #include <unordered_set>
 
-TLANG_NAMESPACE_BEGIN
+namespace taichi::lang {
 
 namespace {
 
 using FlattenContext = Expression::FlattenContext;
 
-template <typename T>
-std::vector<T *> make_raw_pointer_list(
-    const std::vector<std::unique_ptr<T>> &unique_pointers) {
-  std::vector<T *> raw_pointers;
+template <typename Vec>
+std::vector<typename Vec::value_type::pointer> make_raw_pointer_list(
+    const Vec &unique_pointers) {
+  std::vector<typename Vec::value_type::pointer> raw_pointers;
   for (auto &ptr : unique_pointers)
     raw_pointers.push_back(ptr.get());
   return raw_pointers;
@@ -30,33 +30,37 @@ std::vector<T *> make_raw_pointer_list(
 // AST SSA.
 class LowerAST : public IRVisitor {
  private:
-  Stmt *capturing_loop;
-  std::unordered_set<Stmt *> detected_fors_with_break;
-  Block *current_block;
+  Stmt *capturing_loop_;
+  std::unordered_set<Stmt *> detected_fors_with_break_;
+  Block *current_block_;
+  int current_block_depth_;
 
   FlattenContext make_flatten_ctx() {
     FlattenContext fctx;
-    fctx.current_block = this->current_block;
+    fctx.current_block = this->current_block_;
     return fctx;
   }
 
  public:
   explicit LowerAST(const std::unordered_set<Stmt *> &_detected_fors_with_break)
-      : detected_fors_with_break(_detected_fors_with_break),
-        current_block(nullptr) {
+      : detected_fors_with_break_(_detected_fors_with_break),
+        current_block_(nullptr),
+        current_block_depth_(0) {
     // TODO: change this to false
     allow_undefined_visitor = true;
-    capturing_loop = nullptr;
+    capturing_loop_ = nullptr;
   }
 
   void visit(Block *stmt_list) override {
-    auto backup_block = this->current_block;
-    this->current_block = stmt_list;
+    auto backup_block = this->current_block_;
+    this->current_block_ = stmt_list;
     auto stmts = make_raw_pointer_list(stmt_list->statements);
+    current_block_depth_++;
     for (auto &stmt : stmts) {
       stmt->accept(this);
     }
-    this->current_block = backup_block;
+    current_block_depth_--;
+    this->current_block_ = backup_block;
   }
 
   void visit(FrontendAllocaStmt *stmt) override {
@@ -64,46 +68,53 @@ class LowerAST : public IRVisitor {
     auto ident = stmt->ident;
     TI_ASSERT(block->local_var_to_stmt.find(ident) ==
               block->local_var_to_stmt.end());
-    if (stmt->ret_type->is<TensorType>()) {
-      auto tensor_type = stmt->ret_type->cast<TensorType>();
+    auto alloca_type = stmt->ret_type.ptr_removed();
+    if (auto tensor_type = alloca_type->cast<TensorType>()) {
       auto lowered = std::make_unique<AllocaStmt>(
-          tensor_type->get_shape(), tensor_type->get_element_type());
+          tensor_type->get_shape(), tensor_type->get_element_type(),
+          stmt->is_shared);
       block->local_var_to_stmt.insert(std::make_pair(ident, lowered.get()));
       stmt->parent->replace_with(stmt, std::move(lowered));
     } else {
-      auto lowered = std::make_unique<AllocaStmt>(stmt->ret_type);
+      auto lowered = std::make_unique<AllocaStmt>(alloca_type);
       block->local_var_to_stmt.insert(std::make_pair(ident, lowered.get()));
       stmt->parent->replace_with(stmt, std::move(lowered));
     }
-    throw IRModified();
+  }
+
+  void visit(FrontendFuncCallStmt *stmt) override {
+    Block *block = stmt->parent;
+    std::vector<Stmt *> args;
+    args.reserve(stmt->args.exprs.size());
+    auto fctx = make_flatten_ctx();
+    for (const auto &arg : stmt->args.exprs) {
+      args.push_back(flatten_rvalue(arg, &fctx));
+    }
+    auto lowered = fctx.push_back<FuncCallStmt>(stmt->func, args);
+    stmt->parent->replace_with(stmt, std::move(fctx.stmts));
+    if (const auto &ident = stmt->ident) {
+      TI_ASSERT(block->local_var_to_stmt.find(ident.value()) ==
+                block->local_var_to_stmt.end());
+      block->local_var_to_stmt.insert(std::make_pair(ident.value(), lowered));
+    }
   }
 
   void visit(FrontendIfStmt *stmt) override {
     auto fctx = make_flatten_ctx();
-    stmt->condition->flatten(&fctx);
+    auto condition_stmt = flatten_rvalue(stmt->condition, &fctx);
 
-    auto new_if = std::make_unique<IfStmt>(stmt->condition->stmt);
-
-    new_if->true_mask = fctx.push_back<AllocaStmt>(PrimitiveType::i32);
-    new_if->false_mask = fctx.push_back<AllocaStmt>(PrimitiveType::i32);
-
-    fctx.push_back<LocalStoreStmt>(new_if->true_mask, stmt->condition->stmt);
-    auto lnot_stmt_ptr = fctx.push_back<UnaryOpStmt>(UnaryOpType::logic_not,
-                                                     stmt->condition->stmt);
-    fctx.push_back<LocalStoreStmt>(new_if->false_mask, lnot_stmt_ptr);
+    auto new_if = std::make_unique<IfStmt>(condition_stmt);
 
     if (stmt->true_statements) {
       new_if->set_true_statements(std::move(stmt->true_statements));
-      new_if->true_statements->mask_var = new_if->true_mask;
     }
     if (stmt->false_statements) {
       new_if->set_false_statements(std::move(stmt->false_statements));
-      new_if->false_statements->mask_var = new_if->false_mask;
     }
-
+    auto pif = new_if.get();
     fctx.push_back(std::move(new_if));
     stmt->parent->replace_with(stmt, std::move(fctx.stmts));
-    throw IRModified();
+    pif->accept(this);
   }
 
   void visit(IfStmt *if_stmt) override {
@@ -122,26 +133,24 @@ class LowerAST : public IRVisitor {
     for (auto c : stmt->contents) {
       if (std::holds_alternative<Expr>(c)) {
         auto x = std::get<Expr>(c);
-        x->flatten(&fctx);
-        stmts.push_back(x->stmt);
-        new_contents.push_back(x->stmt);
+        auto x_stmt = flatten_rvalue(x, &fctx);
+        stmts.push_back(x_stmt);
+        new_contents.push_back(x_stmt);
       } else {
         auto x = std::get<std::string>(c);
         new_contents.push_back(x);
       }
     }
-    fctx.push_back<PrintStmt>(new_contents);
+    fctx.push_back<PrintStmt>(new_contents, stmt->formats);
     stmt->parent->replace_with(stmt, std::move(fctx.stmts));
-    throw IRModified();
   }
 
   void visit(FrontendBreakStmt *stmt) override {
-    auto while_stmt = capturing_loop->as<WhileStmt>();
+    auto while_stmt = capturing_loop_->as<WhileStmt>();
     VecStatement stmts;
     auto const_true = stmts.push_back<ConstStmt>(TypedConstant((int32)0));
     stmts.push_back<WhileControlStmt>(while_stmt->mask, const_true);
     stmt->parent->replace_with(stmt, std::move(stmts));
-    throw IRModified();
   }
 
   void visit(FrontendContinueStmt *stmt) override {
@@ -153,8 +162,7 @@ class LowerAST : public IRVisitor {
     // while (1) { cond; if (no active) break; original body...}
     auto cond = stmt->cond;
     auto fctx = make_flatten_ctx();
-    cond->flatten(&fctx);
-    auto cond_stmt = fctx.back_stmt();
+    auto cond_stmt = flatten_rvalue(cond, &fctx);
 
     auto &&new_while = std::make_unique<WhileStmt>(std::move(stmt->body));
     auto mask = std::make_unique<AllocaStmt>(PrimitiveType::i32);
@@ -165,7 +173,6 @@ class LowerAST : public IRVisitor {
     stmts->insert(
         std::make_unique<WhileControlStmt>(new_while->mask, cond_stmt),
         fctx.stmts.size());
-    stmt->insert_before_me(std::make_unique<AllocaStmt>(PrimitiveType::i32));
     auto &&const_stmt =
         std::make_unique<ConstStmt>(TypedConstant((int32)0xFFFFFFFF));
     auto const_stmt_ptr = const_stmt.get();
@@ -173,17 +180,17 @@ class LowerAST : public IRVisitor {
     stmt->insert_before_me(std::move(const_stmt));
     stmt->insert_before_me(
         std::make_unique<LocalStoreStmt>(new_while->mask, const_stmt_ptr));
-    new_while->body->mask_var = new_while->mask;
+    auto pwhile = new_while.get();
     stmt->parent->replace_with(stmt, std::move(new_while));
+    pwhile->accept(this);
     // insert an alloca for the mask
-    throw IRModified();
   }
 
   void visit(WhileStmt *stmt) override {
-    auto old_capturing_loop = capturing_loop;
-    capturing_loop = stmt;
+    auto old_capturing_loop = capturing_loop_;
+    capturing_loop_ = stmt;
     stmt->body->accept(this);
-    capturing_loop = old_capturing_loop;
+    capturing_loop_ = old_capturing_loop;
   }
 
   void visit(LoopIndexStmt *stmt) override {
@@ -196,91 +203,8 @@ class LowerAST : public IRVisitor {
 
   void visit(FrontendForStmt *stmt) override {
     auto fctx = make_flatten_ctx();
-    if (stmt->is_ranged()) {
-      TI_ASSERT(stmt->loop_var_id.size() == 1);
-      auto begin = stmt->begin;
-      auto end = stmt->end;
-      begin->flatten(&fctx);
-      end->flatten(&fctx);
-      bool is_good_range_for =
-          capturing_loop == nullptr ||
-          detected_fors_with_break.find(stmt) == detected_fors_with_break.end();
-      // #578: a good range for is a range for that doesn't contains a break
-      // statement
-      if (is_good_range_for) {
-        auto &&new_for = std::make_unique<RangeForStmt>(
-            begin->stmt, end->stmt, std::move(stmt->body), stmt->vectorize,
-            stmt->bit_vectorize, stmt->num_cpu_threads, stmt->block_dim,
-            stmt->strictly_serialized);
-        new_for->body->insert(std::make_unique<LoopIndexStmt>(new_for.get(), 0),
-                              0);
-        new_for->body->local_var_to_stmt[stmt->loop_var_id[0]] =
-            new_for->body->statements[0].get();
-        fctx.push_back(std::move(new_for));
-      } else {
-        // transform into a structure as
-        // i = begin; while (1) { if (i >= end) break; original body; i += 1; }
-        fctx.push_back<AllocaStmt>(PrimitiveType::i32);
-        auto loop_var = fctx.back_stmt();
-        stmt->parent->local_var_to_stmt[stmt->loop_var_id[0]] = loop_var;
-        fctx.push_back<LocalStoreStmt>(loop_var, begin->stmt);
-        auto loop_var_addr = LaneAttribute<LocalAddress>(
-            LocalAddress(loop_var->as<AllocaStmt>(), 0));
-        VecStatement load_and_compare;
-        auto loop_var_load_stmt =
-            load_and_compare.push_back<LocalLoadStmt>(loop_var_addr);
-        auto cond_stmt = load_and_compare.push_back<BinaryOpStmt>(
-            BinaryOpType::cmp_lt, loop_var_load_stmt, end->stmt);
-
-        auto &&new_while = std::make_unique<WhileStmt>(std::move(stmt->body));
-        auto mask = std::make_unique<AllocaStmt>(PrimitiveType::i32);
-        new_while->mask = mask.get();
-        auto &stmts = new_while->body;
-        for (int i = 0; i < (int)load_and_compare.size(); i++) {
-          stmts->insert(std::move(load_and_compare[i]), i);
-        }
-
-        VecStatement increase_and_store;
-        auto const_one =
-            increase_and_store.push_back<ConstStmt>(TypedConstant((int32)1));
-        auto loop_var_add_one = increase_and_store.push_back<BinaryOpStmt>(
-            BinaryOpType::add, loop_var_load_stmt, const_one);
-        increase_and_store.push_back<LocalStoreStmt>(loop_var,
-                                                     loop_var_add_one);
-        for (int i = 0; i < (int)increase_and_store.size(); i++) {
-          stmts->insert(std::move(increase_and_store[i]), stmts->size());
-        }
-        // insert break
-        stmts->insert(
-            std::make_unique<WhileControlStmt>(new_while->mask, cond_stmt),
-            load_and_compare.size());
-
-        stmt->insert_before_me(
-            std::make_unique<AllocaStmt>(PrimitiveType::i32));
-        auto &&const_stmt =
-            std::make_unique<ConstStmt>(TypedConstant((int32)0xFFFFFFFF));
-        auto const_stmt_ptr = const_stmt.get();
-        stmt->insert_before_me(std::move(mask));
-        stmt->insert_before_me(std::move(const_stmt));
-        stmt->insert_before_me(
-            std::make_unique<LocalStoreStmt>(new_while->mask, const_stmt_ptr));
-        new_while->body->mask_var = new_while->mask;
-        fctx.push_back(std::move(new_while));
-      }
-    } else if (stmt->mesh_for) {
-      auto &&new_for = std::make_unique<MeshForStmt>(
-          stmt->mesh, stmt->element_type, std::move(stmt->body),
-          stmt->vectorize, stmt->bit_vectorize, stmt->num_cpu_threads,
-          stmt->block_dim);
-      new_for->body->insert(std::make_unique<LoopIndexStmt>(new_for.get(), 0),
-                            0);
-      new_for->body->local_var_to_stmt[stmt->loop_var_id[0]] =
-          new_for->body->statements[0].get();
-      new_for->mem_access_opt = stmt->mem_access_opt;
-      new_for->fields_registered = true;
-      fctx.push_back(std::move(new_for));
-    } else if (stmt->global_var.is<GlobalVariableExpression>()) {
-      auto snode = stmt->global_var.cast<GlobalVariableExpression>()->snode;
+    if (stmt->snode) {
+      auto snode = stmt->snode;
       std::vector<int> offsets;
       if (snode->type == SNodeType::place) {
         /* Note:
@@ -305,11 +229,11 @@ class LowerAST : public IRVisitor {
         snode = snode->parent;
 
       auto &&new_for = std::make_unique<StructForStmt>(
-          snode, std::move(stmt->body), stmt->vectorize, stmt->bit_vectorize,
+          snode, std::move(stmt->body), stmt->is_bit_vectorized,
           stmt->num_cpu_threads, stmt->block_dim);
       new_for->index_offsets = offsets;
       VecStatement new_statements;
-      for (int i = 0; i < (int)stmt->loop_var_id.size(); i++) {
+      for (int i = 0; i < (int)stmt->loop_var_ids.size(); i++) {
         Stmt *loop_index = new_statements.push_back<LoopIndexStmt>(
             new_for.get(), snode->physical_index_position[i]);
         if ((int)offsets.size() > i && offsets[i] != 0) {
@@ -319,119 +243,205 @@ class LowerAST : public IRVisitor {
               BinaryOpType::add, loop_index, offset_const);
           loop_index = result;
         }
-        new_for->body->local_var_to_stmt[stmt->loop_var_id[i]] = loop_index;
+        new_for->body->local_var_to_stmt[stmt->loop_var_ids[i]] = loop_index;
       }
       new_for->body->insert(std::move(new_statements), 0);
       new_for->mem_access_opt = stmt->mem_access_opt;
       fctx.push_back(std::move(new_for));
-    } else {
-      auto tensor = stmt->global_var.cast<ExternalTensorExpression>();
+    } else if (stmt->external_tensor) {
+      std::vector<int> arg_id;
       std::vector<Stmt *> shape;
-      if (tensor->element_dim > 0) {  // Layout.SOA
-        for (int i = tensor->element_dim; i < tensor->dim; i++) {
-          shape.push_back(fctx.push_back<ExternalTensorShapeAlongAxisStmt>(
-              i, tensor->arg_id));
+      if (stmt->external_tensor.is<ExternalTensorExpression>()) {
+        auto tensor = stmt->external_tensor.cast<ExternalTensorExpression>();
+        arg_id = tensor->arg_id;
+        for (int i = 0; i < tensor->ndim; i++) {
+          shape.push_back(
+              fctx.push_back<ExternalTensorShapeAlongAxisStmt>(i, arg_id));
         }
-      } else {  // Layout.AOS
-        for (int i = 0; i < tensor->dim + tensor->element_dim; i++) {
-          shape.push_back(fctx.push_back<ExternalTensorShapeAlongAxisStmt>(
-              i, tensor->arg_id));
+      } else if (stmt->external_tensor.is<TexturePtrExpression>()) {
+        auto rw_texture = stmt->external_tensor.cast<TexturePtrExpression>();
+        arg_id = rw_texture->arg_id;
+        for (size_t i = 0; i < rw_texture->num_dims; ++i) {
+          shape.emplace_back(
+              fctx.push_back<ExternalTensorShapeAlongAxisStmt>(i, arg_id));
         }
       }
+
       Stmt *begin = fctx.push_back<ConstStmt>(TypedConstant(0));
       Stmt *end = fctx.push_back<ConstStmt>(TypedConstant(1));
       for (int i = 0; i < (int)shape.size(); i++) {
         end = fctx.push_back<BinaryOpStmt>(BinaryOpType::mul, end, shape[i]);
       }
+      // TODO: add a note explaining why shape might be empty.
       auto &&new_for = std::make_unique<RangeForStmt>(
-          begin, end, std::move(stmt->body), stmt->vectorize,
-          stmt->bit_vectorize, stmt->num_cpu_threads, stmt->block_dim,
-          stmt->strictly_serialized);
+          begin, end, std::move(stmt->body), stmt->is_bit_vectorized,
+          stmt->num_cpu_threads, stmt->block_dim, stmt->strictly_serialized,
+          /*range_hint=*/fmt::format("arg ({})", fmt::join(arg_id, ", ")));
       VecStatement new_statements;
       Stmt *loop_index =
           new_statements.push_back<LoopIndexStmt>(new_for.get(), 0);
       for (int i = (int)shape.size() - 1; i >= 0; i--) {
-        new_for->body->local_var_to_stmt[stmt->loop_var_id[i]] =
-            new_statements.push_back<BinaryOpStmt>(BinaryOpType::mod,
-                                                   loop_index, shape[i]);
+        Stmt *loop_var = new_statements.push_back<BinaryOpStmt>(
+            BinaryOpType::mod, loop_index, shape[i]);
+        new_for->body->local_var_to_stmt[stmt->loop_var_ids[i]] = loop_var;
+        std::vector<uint32_t> decoration = {
+            uint32_t(DecorationStmt::Decoration::kLoopUnique), uint32_t(i)};
+        new_statements.push_back<DecorationStmt>(loop_var, decoration);
         loop_index = new_statements.push_back<BinaryOpStmt>(
             BinaryOpType::div, loop_index, shape[i]);
       }
       new_for->body->insert(std::move(new_statements), 0);
       fctx.push_back(std::move(new_for));
+    } else if (stmt->mesh) {
+      auto &&new_for = std::make_unique<MeshForStmt>(
+          stmt->mesh, stmt->element_type, std::move(stmt->body),
+          stmt->is_bit_vectorized, stmt->num_cpu_threads, stmt->block_dim);
+      new_for->body->insert(std::make_unique<LoopIndexStmt>(new_for.get(), 0),
+                            0);
+      new_for->body->local_var_to_stmt[stmt->loop_var_ids[0]] =
+          new_for->body->statements[0].get();
+      new_for->mem_access_opt = stmt->mem_access_opt;
+      new_for->fields_registered = true;
+      fctx.push_back(std::move(new_for));
+    } else {
+      TI_ASSERT(stmt->loop_var_ids.size() == 1);
+      auto begin = stmt->begin;
+      auto end = stmt->end;
+      auto begin_stmt = flatten_rvalue(begin, &fctx);
+      auto end_stmt = flatten_rvalue(end, &fctx);
+      bool is_good_range_for = detected_fors_with_break_.find(stmt) ==
+                               detected_fors_with_break_.end();
+      // #578: a good range for is a range for that doesn't contain a break
+      // statement
+      if (is_good_range_for) {
+        auto &&new_for = std::make_unique<RangeForStmt>(
+            begin_stmt, end_stmt, std::move(stmt->body),
+            stmt->is_bit_vectorized, stmt->num_cpu_threads, stmt->block_dim,
+            stmt->strictly_serialized);
+        new_for->body->insert(std::make_unique<LoopIndexStmt>(new_for.get(), 0),
+                              0);
+        new_for->body->local_var_to_stmt[stmt->loop_var_ids[0]] =
+            new_for->body->statements[0].get();
+        fctx.push_back(std::move(new_for));
+      } else {
+        // transform into a structure as
+        // i = begin - 1; while (1) { i += 1; if (i >= end) break; original
+        // body; }
+        fctx.push_back<AllocaStmt>(PrimitiveType::i32);
+        auto loop_var = fctx.back_stmt();
+        stmt->parent->local_var_to_stmt[stmt->loop_var_ids[0]] = loop_var;
+        auto const_one = fctx.push_back<ConstStmt>(TypedConstant((int32)1));
+        auto begin_minus_one = fctx.push_back<BinaryOpStmt>(
+            BinaryOpType::sub, begin_stmt, const_one);
+        fctx.push_back<LocalStoreStmt>(loop_var, begin_minus_one);
+        auto loop_var_addr = loop_var->as<AllocaStmt>();
+        VecStatement load_and_compare;
+        auto loop_var_load_stmt =
+            load_and_compare.push_back<LocalLoadStmt>(loop_var_addr);
+        auto loop_var_add_one = load_and_compare.push_back<BinaryOpStmt>(
+            BinaryOpType::add, loop_var_load_stmt, const_one);
+
+        auto cond_stmt = load_and_compare.push_back<BinaryOpStmt>(
+            BinaryOpType::cmp_lt, loop_var_add_one, end_stmt);
+
+        auto &&new_while = std::make_unique<WhileStmt>(std::move(stmt->body));
+        auto mask = std::make_unique<AllocaStmt>(PrimitiveType::i32);
+        new_while->mask = mask.get();
+
+        // insert break
+        load_and_compare.push_back<WhileControlStmt>(new_while->mask,
+                                                     cond_stmt);
+        load_and_compare.push_back<LocalStoreStmt>(loop_var, loop_var_add_one);
+        auto &stmts = new_while->body;
+        for (int i = 0; i < (int)load_and_compare.size(); i++) {
+          stmts->insert(std::move(load_and_compare[i]), i);
+        }
+
+        stmt->insert_before_me(
+            std::make_unique<AllocaStmt>(PrimitiveType::i32));
+        auto &&const_stmt =
+            std::make_unique<ConstStmt>(TypedConstant((int32)0xFFFFFFFF));
+        auto const_stmt_ptr = const_stmt.get();
+        stmt->insert_before_me(std::move(mask));
+        stmt->insert_before_me(std::move(const_stmt));
+        stmt->insert_before_me(
+            std::make_unique<LocalStoreStmt>(new_while->mask, const_stmt_ptr));
+        fctx.push_back(std::move(new_while));
+      }
     }
+    auto pfor = fctx.stmts.back().get();
     stmt->parent->replace_with(stmt, std::move(fctx.stmts));
-    throw IRModified();
+    pfor->accept(this);
   }
 
   void visit(RangeForStmt *for_stmt) override {
-    auto old_capturing_loop = capturing_loop;
-    capturing_loop = for_stmt;
+    auto old_capturing_loop = capturing_loop_;
+    capturing_loop_ = for_stmt;
     for_stmt->body->accept(this);
-    capturing_loop = old_capturing_loop;
+    capturing_loop_ = old_capturing_loop;
   }
 
   void visit(StructForStmt *for_stmt) override {
-    auto old_capturing_loop = capturing_loop;
-    capturing_loop = for_stmt;
+    auto old_capturing_loop = capturing_loop_;
+    capturing_loop_ = for_stmt;
     for_stmt->body->accept(this);
-    capturing_loop = old_capturing_loop;
+    capturing_loop_ = old_capturing_loop;
   }
 
   void visit(MeshForStmt *for_stmt) override {
-    auto old_capturing_loop = capturing_loop;
-    capturing_loop = for_stmt;
+    auto old_capturing_loop = capturing_loop_;
+    capturing_loop_ = for_stmt;
     for_stmt->body->accept(this);
-    capturing_loop = old_capturing_loop;
+    capturing_loop_ = old_capturing_loop;
   }
 
   void visit(FrontendReturnStmt *stmt) override {
-    auto expr = stmt->value;
+    auto expr_group = stmt->values;
     auto fctx = make_flatten_ctx();
-    expr->flatten(&fctx);
-    fctx.push_back<ReturnStmt>(fctx.back_stmt());
+    std::vector<Stmt *> return_ele;
+    for (auto &x : expr_group.exprs) {
+      return_ele.push_back(flatten_rvalue(x, &fctx));
+    }
+    fctx.push_back<ReturnStmt>(return_ele);
     stmt->parent->replace_with(stmt, std::move(fctx.stmts));
-    throw IRModified();
-  }
-
-  void visit(FrontendEvalStmt *stmt) override {
-    // expand rhs
-    auto expr = stmt->expr;
-    auto fctx = make_flatten_ctx();
-    expr->flatten(&fctx);
-    stmt->parent->replace_with(stmt, std::move(fctx.stmts));
-    throw IRModified();
   }
 
   void visit(FrontendAssignStmt *assign) override {
-    // expand rhs
+    auto dest = assign->lhs;
     auto expr = assign->rhs;
     auto fctx = make_flatten_ctx();
-    expr->flatten(&fctx);
-    if (assign->lhs.is<IdExpression>()) {  // local variable
-      // emit local store stmt
-      fctx.push_back<LocalStoreStmt>(
-          assign->parent->lookup_var(assign->lhs.cast<IdExpression>()->id),
-          expr->stmt);
-    } else if (assign->lhs.is<TensorElementExpression>()) {
-      auto tensor_ptr = assign->lhs.cast<TensorElementExpression>();
-      tensor_ptr->flatten(&fctx);
-      if (tensor_ptr->is_local_tensor()) {
-        fctx.push_back<LocalStoreStmt>(tensor_ptr->stmt, expr->stmt);
-      } else if (tensor_ptr->is_global_tensor()) {
-        fctx.push_back<GlobalStoreStmt>(tensor_ptr->stmt, expr->stmt);
-      } else {
-        TI_NOT_IMPLEMENTED
+    auto expr_stmt = flatten_rvalue(expr, &fctx);
+    auto dest_stmt = flatten_lvalue(dest, &fctx);
+
+    // Perform broadcast
+    if (auto dest_tensor_type =
+            dest_stmt->ret_type.ptr_removed()->cast<TensorType>()) {
+      if (expr_stmt->ret_type->is<PrimitiveType>()) {
+        int num_elements = dest_tensor_type->get_num_elements();
+        std::vector<Stmt *> matrix_members(num_elements, expr_stmt);
+
+        auto bcast_expr_stmt = fctx.push_back<MatrixInitStmt>(matrix_members);
+        bcast_expr_stmt->ret_type = dest_tensor_type;
+        expr_stmt = bcast_expr_stmt;
       }
-    } else {  // global variable
-      TI_ASSERT(assign->lhs.is<GlobalPtrExpression>());
-      auto global_ptr = assign->lhs.cast<GlobalPtrExpression>();
-      global_ptr->flatten(&fctx);
-      fctx.push_back<GlobalStoreStmt>(fctx.back_stmt(), expr->stmt);
     }
-    fctx.stmts.back()->set_tb(assign->tb);
+
+    if (dest.is<IdExpression>()) {
+      fctx.push_back<LocalStoreStmt>(dest_stmt, expr_stmt);
+    } else if (dest.is<IndexExpression>()) {
+      auto ix = dest.cast<IndexExpression>();
+      if (ix->is_local()) {
+        fctx.push_back<LocalStoreStmt>(dest_stmt, expr_stmt);
+      } else {
+        fctx.push_back<GlobalStoreStmt>(dest_stmt, expr_stmt);
+      }
+    } else {
+      TI_ASSERT(dest.is<ArgLoadExpression>() &&
+                dest.cast<ArgLoadExpression>()->is_ptr);
+      fctx.push_back<GlobalStoreStmt>(dest_stmt, expr_stmt);
+    }
+    fctx.stmts.back()->dbg_info = assign->dbg_info;
     assign->parent->replace_with(assign, std::move(fctx.stmts));
-    throw IRModified();
   }
 
   void visit(FrontendSNodeOpStmt *stmt) override {
@@ -439,26 +449,28 @@ class LowerAST : public IRVisitor {
     Stmt *val_stmt = nullptr;
     auto fctx = make_flatten_ctx();
     if (stmt->val.expr) {
-      auto expr = stmt->val;
-      expr->flatten(&fctx);
-      val_stmt = expr->stmt;
+      val_stmt = flatten_rvalue(stmt->val, &fctx);
     }
     std::vector<Stmt *> indices_stmt(stmt->indices.size(), nullptr);
 
     for (int i = 0; i < (int)stmt->indices.size(); i++) {
-      stmt->indices[i]->flatten(&fctx);
-      indices_stmt[i] = stmt->indices[i]->stmt;
+      indices_stmt[i] = flatten_rvalue(stmt->indices[i], &fctx);
     }
 
     if (stmt->snode->type == SNodeType::dynamic) {
       auto ptr = fctx.push_back<GlobalPtrStmt>(stmt->snode, indices_stmt);
+      ptr->ret_type = stmt->snode->dt;
+      ptr->ret_type.set_is_pointer(true);
       fctx.push_back<SNodeOpStmt>(stmt->op_type, stmt->snode, ptr, val_stmt);
     } else if (stmt->snode->type == SNodeType::pointer ||
                stmt->snode->type == SNodeType::hash ||
                stmt->snode->type == SNodeType::dense ||
                stmt->snode->type == SNodeType::bitmasked) {
       TI_ASSERT(SNodeOpStmt::activation_related(stmt->op_type));
-      auto ptr = fctx.push_back<GlobalPtrStmt>(stmt->snode, indices_stmt);
+      auto ptr =
+          fctx.push_back<GlobalPtrStmt>(stmt->snode, indices_stmt, true, true);
+      ptr->ret_type = stmt->snode->dt;
+      ptr->ret_type.set_is_pointer(true);
       fctx.push_back<SNodeOpStmt>(stmt->op_type, stmt->snode, ptr, val_stmt);
     } else {
       TI_ERROR("The {} operation is not supported on {} SNode",
@@ -468,7 +480,6 @@ class LowerAST : public IRVisitor {
     }
 
     stmt->parent->replace_with(stmt, std::move(fctx.stmts));
-    throw IRModified();
   }
 
   void visit(FrontendAssertStmt *stmt) override {
@@ -476,41 +487,63 @@ class LowerAST : public IRVisitor {
     Stmt *val_stmt = nullptr;
     auto fctx = make_flatten_ctx();
     if (stmt->cond.expr) {
-      auto expr = stmt->cond;
-      expr->flatten(&fctx);
-      val_stmt = expr->stmt;
+      val_stmt = flatten_rvalue(stmt->cond, &fctx);
     }
 
     auto &fargs = stmt->args;  // frontend stmt args
     std::vector<Stmt *> args_stmts(fargs.size());
     for (int i = 0; i < (int)fargs.size(); ++i) {
-      fargs[i]->flatten(&fctx);
-      args_stmts[i] = fargs[i]->stmt;
+      args_stmts[i] = flatten_rvalue(fargs[i], &fctx);
     }
-    fctx.push_back<AssertStmt>(val_stmt, stmt->text, args_stmts);
+    fctx.push_back<AssertStmt>(val_stmt, stmt->text, args_stmts,
+                               stmt->dbg_info);
     stmt->parent->replace_with(stmt, std::move(fctx.stmts));
-    throw IRModified();
   }
 
   void visit(FrontendExprStmt *stmt) override {
     auto fctx = make_flatten_ctx();
-    stmt->val->flatten(&fctx);
+    flatten_rvalue(stmt->val, &fctx);
     stmt->parent->replace_with(stmt, std::move(fctx.stmts));
-    throw IRModified();
+  }
+
+  void visit(FrontendExternalFuncStmt *stmt) override {
+    auto ctx = make_flatten_ctx();
+    TI_ASSERT((int)(stmt->so_func != nullptr) +
+                  (int)(!stmt->asm_source.empty()) +
+                  (int)(!stmt->bc_filename.empty()) ==
+              1);
+    std::vector<Stmt *> arg_statements, output_statements;
+    if (stmt->so_func != nullptr || !stmt->asm_source.empty()) {
+      for (auto &s : stmt->args) {
+        arg_statements.push_back(flatten_rvalue(s, &ctx));
+      }
+      for (auto &s : stmt->outputs) {
+        output_statements.push_back(flatten_lvalue(s, &ctx));
+      }
+      ctx.push_back(std::make_unique<ExternalFuncCallStmt>(
+          (stmt->so_func != nullptr) ? ExternalFuncCallStmt::SHARED_OBJECT
+                                     : ExternalFuncCallStmt::ASSEMBLY,
+          stmt->so_func, stmt->asm_source, "", "", arg_statements,
+          output_statements));
+    } else {
+      for (auto &s : stmt->args) {
+        if (!s.is<IdExpression>()) {
+          ErrorEmitter(
+              TaichiSyntaxError(), stmt,
+              "external func call via bitcode must pass in local variables.");
+        }
+        arg_statements.push_back(flatten_lvalue(s, &ctx));
+      }
+      ctx.push_back(std::make_unique<ExternalFuncCallStmt>(
+          ExternalFuncCallStmt::BITCODE, nullptr, "", stmt->bc_filename,
+          stmt->bc_funcname, arg_statements, output_statements));
+    }
+    stmt->parent->replace_with(stmt, std::move(ctx.stmts));
   }
 
   static void run(IRNode *node) {
     LowerAST inst(irpass::analysis::detect_fors_with_break(node));
-    while (true) {
-      bool modified = false;
-      try {
-        node->accept(&inst);
-      } catch (IRModified) {
-        modified = true;
-      }
-      if (!modified)
-        break;
-    }
+    node->accept(&inst);
   }
 };
 
@@ -523,4 +556,4 @@ void lower_ast(IRNode *root) {
 
 }  // namespace irpass
 
-TLANG_NAMESPACE_END
+}  // namespace taichi::lang

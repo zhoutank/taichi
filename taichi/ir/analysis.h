@@ -10,12 +10,11 @@
 #include <unordered_set>
 #include <unordered_map>
 
-namespace taichi {
-namespace lang {
+namespace taichi::lang {
 
 class DiffRange {
  private:
-  bool related;
+  bool related_;
 
  public:
   int coeff;
@@ -33,22 +32,22 @@ class DiffRange {
   }
 
   DiffRange(bool related, int coeff, int low, int high)
-      : related(related), coeff(coeff), low(low), high(high) {
+      : related_(related), coeff(coeff), low(low), high(high) {
     if (!related) {
       this->low = this->high = 0;
     }
   }
 
-  bool related_() const {
-    return related;
+  bool related() const {
+    return related_;
   }
 
   bool linear_related() const {
-    return related && coeff == 1;
+    return related_ && coeff == 1;
   }
 
   bool certain() {
-    TI_ASSERT(related);
+    TI_ASSERT(related_);
     return high == low + 1;
   }
 };
@@ -56,10 +55,6 @@ class DiffRange {
 enum AliasResult { same, uncertain, different };
 
 class ControlFlowGraph;
-
-struct TaskMeta;
-class IRBank;
-class AsyncStateSet;
 
 // IR Analysis
 namespace irpass {
@@ -81,7 +76,8 @@ AliasResult alias_analysis(Stmt *var1, Stmt *var2);
 
 std::unique_ptr<ControlFlowGraph> build_cfg(IRNode *root);
 void check_fields_registered(IRNode *root);
-std::unique_ptr<IRNode> clone(IRNode *root, Kernel *kernel = nullptr);
+std::unique_ptr<IRNode> clone(IRNode *root);
+std::unique_ptr<Stmt> clone(Stmt *root);
 int count_statements(IRNode *root);
 
 /**
@@ -100,33 +96,31 @@ bool definitely_same_address(Stmt *var1, Stmt *var2);
 
 std::unordered_set<Stmt *> detect_fors_with_break(IRNode *root);
 std::unordered_set<Stmt *> detect_loops_with_continue(IRNode *root);
+std::unordered_map<Stmt *, std::vector<std::pair<Stmt *, int>>>
+gather_statement_usages(IRNode *root);
+std::unordered_set<Stmt *> gather_immutable_local_vars(IRNode *root);
 std::unordered_set<SNode *> gather_deactivations(IRNode *root);
 std::pair<std::unordered_set<SNode *>, std::unordered_set<SNode *>>
 gather_snode_read_writes(IRNode *root);
 std::vector<Stmt *> gather_statements(IRNode *root,
                                       const std::function<bool(Stmt *)> &test);
 void gather_uniquely_accessed_bit_structs(IRNode *root, AnalysisManager *amgr);
-std::unordered_map<const SNode *, GlobalPtrStmt *>
+std::tuple<std::unordered_map<const SNode *, GlobalPtrStmt *>,
+           std::unordered_map<std::vector<int>,
+                              ExternalPtrStmt *,
+                              hashing::Hasher<std::vector<int>>>,
+           std::unordered_set<MatrixPtrStmt *>>
 gather_uniquely_accessed_pointers(IRNode *root);
+std::unordered_set<Stmt *> gather_dynamically_indexed_pointers(IRNode *root);
+
 std::unique_ptr<std::unordered_set<AtomicOpStmt *>> gather_used_atomics(
     IRNode *root);
-std::vector<Stmt *> get_load_pointers(Stmt *load_stmt);
+stmt_refs get_load_pointers(Stmt *load_stmt, bool get_aliased = false);
+stmt_refs include_aliased_stmts(stmt_refs dest);
 
-/**
- * Get all input SNode value states of an offloaded task with control-flow
- * graph analysis.
- * The global temporary value state and SNodeOpStmts are not considered.
- *
- * @param root
- *   The offloaded task.
- * @param meta
- *   The result is stored in meta->input_states.
- * @param ir_bank
- *   The IR bank (only IRBank::get_async_state() is used).
- */
-void get_meta_input_value_states(IRNode *root, TaskMeta *meta, IRBank *ir_bank);
-Stmt *get_store_data(Stmt *store_stmt);
-std::vector<Stmt *> get_store_destination(Stmt *store_stmt);
+Stmt *get_store_data(Stmt *store_stmt) noexcept;
+stmt_refs get_store_destination(Stmt *store_stmt,
+                                bool get_aliased = false) noexcept;
 bool has_store_or_atomic(IRNode *root, const std::vector<Stmt *> &vars);
 std::pair<bool, Stmt *> last_store_or_atomic(IRNode *root, Stmt *var);
 
@@ -165,28 +159,7 @@ bool same_statements(
     IRNode *root1,
     IRNode *root2,
     const std::optional<std::unordered_map<int, int>> &id_map = std::nullopt);
-/**
- * Test if stmt1 and stmt2 definitely have the same value.
- *
- * @param stmt1
- *   The first stmt to check.
- *
- * @param stmt2
- *   The second stmt to check.
- *
- * @param possibly_modified_states
- *   Assumes that only states in possibly_modified_states can be modified
- *   between stmt1 and stmt2.
- *
- * @param id_map
- *   Same as in same_statements(root1, root2, id_map).
- */
-bool same_value(
-    Stmt *stmt1,
-    Stmt *stmt2,
-    const AsyncStateSet &possibly_modified_states,
-    IRBank *ir_bank,
-    const std::optional<std::unordered_map<int, int>> &id_map = std::nullopt);
+
 /**
  * Test if stmt1 and stmt2 definitely have the same value.
  * Any global fields can be modified between stmt1 and stmt2.
@@ -205,7 +178,7 @@ DiffRange value_diff_loop_index(Stmt *stmt, Stmt *loop, int index_id);
  * Result of the value_diff_ptr_index pass.
  */
 struct DiffPtrResult {
-  // Whether the difference of the checkd statements is certain.
+  // Whether the difference of the checked statements is certain.
   bool is_diff_certain{false};
   // The difference of the value of two statements (i.e. val1 - val2). This is
   // meaningful only when |is_diff_certain| is true.
@@ -242,9 +215,10 @@ std::pair</* owned= */ std::unordered_set<mesh::MeshElementType>,
           /* total= */ std::unordered_set<mesh::MeshElementType>>
 gather_mesh_thread_local(OffloadedStmt *offload, const CompileConfig &config);
 std::unique_ptr<MeshBLSCaches> initialize_mesh_local_attribute(
-    OffloadedStmt *offload);
-
+    OffloadedStmt *offload,
+    bool auto_mesh_local,
+    const CompileConfig &config);
+void gather_func_store_dests(IRNode *ir);
 }  // namespace analysis
 }  // namespace irpass
-}  // namespace lang
-}  // namespace taichi
+}  // namespace taichi::lang

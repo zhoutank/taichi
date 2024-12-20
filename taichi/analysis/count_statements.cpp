@@ -2,13 +2,13 @@
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/visitors.h"
 
-TLANG_NAMESPACE_BEGIN
+namespace taichi::lang {
 
 // Count all statements (including containers)
 class StmtCounter : public BasicStmtVisitor {
  private:
   StmtCounter() {
-    counter = 0;
+    counter_ = 0;
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
   }
@@ -17,21 +17,21 @@ class StmtCounter : public BasicStmtVisitor {
 
  public:
   void preprocess_container_stmt(Stmt *stmt) override {
-    counter++;
+    counter_++;
   }
 
   void visit(Stmt *stmt) override {
-    counter++;
+    counter_++;
   }
 
   static int run(IRNode *root) {
     StmtCounter stmt_counter;
     root->accept(&stmt_counter);
-    return stmt_counter.counter;
+    return stmt_counter.counter_;
   }
 
  private:
-  int counter;
+  int counter_;
 };
 
 namespace irpass::analysis {
@@ -41,4 +41,4 @@ int count_statements(IRNode *root) {
 }
 }  // namespace irpass::analysis
 
-TLANG_NAMESPACE_END
+}  // namespace taichi::lang

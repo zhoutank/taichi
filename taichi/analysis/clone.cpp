@@ -7,12 +7,12 @@
 
 #include <unordered_map>
 
-TLANG_NAMESPACE_BEGIN
+namespace taichi::lang {
 
 class IRCloner : public IRVisitor {
  private:
   IRNode *other_node;
-  std::unordered_map<Stmt *, Stmt *> operand_map;
+  std::unordered_map<Stmt *, Stmt *> operand_map_;
 
  public:
   enum Phase { register_operand_map, replace_operand } phase;
@@ -34,16 +34,16 @@ class IRCloner : public IRVisitor {
 
   void generic_visit(Stmt *stmt) {
     if (phase == register_operand_map)
-      operand_map[stmt] = other_node->as<Stmt>();
+      operand_map_[stmt] = other_node->as<Stmt>();
     else {
       TI_ASSERT(phase == replace_operand);
       auto other_stmt = other_node->as<Stmt>();
       TI_ASSERT(stmt->num_operands() == other_stmt->num_operands());
       for (int i = 0; i < stmt->num_operands(); i++) {
-        if (operand_map.find(stmt->operand(i)) == operand_map.end())
+        if (operand_map_.find(stmt->operand(i)) == operand_map_.end())
           other_stmt->set_operand(i, stmt->operand(i));
         else
-          other_stmt->set_operand(i, operand_map[stmt->operand(i)]);
+          other_stmt->set_operand(i, operand_map_[stmt->operand(i)]);
       }
     }
   }
@@ -65,14 +65,6 @@ class IRCloner : public IRVisitor {
       stmt->false_statements->accept(this);
       other_node = other;
     }
-  }
-
-  void visit(FuncBodyStmt *stmt) override {
-    generic_visit(stmt);
-    auto other = other_node->as<FuncBodyStmt>();
-    other_node = other->body.get();
-    stmt->body->accept(this);
-    other_node = other;
   }
 
   void visit(WhileStmt *stmt) override {
@@ -126,7 +118,7 @@ class IRCloner : public IRVisitor {
     other_node = other;
   }
 
-  static std::unique_ptr<IRNode> run(IRNode *root, Kernel *kernel) {
+  static std::unique_ptr<IRNode> run(IRNode *root) {
     std::unique_ptr<IRNode> new_root = root->clone();
     IRCloner cloner(new_root.get());
     cloner.phase = IRCloner::register_operand_map;
@@ -134,17 +126,22 @@ class IRCloner : public IRVisitor {
     cloner.phase = IRCloner::replace_operand;
     root->accept(&cloner);
 
-    if (kernel != nullptr) {
-      new_root->kernel = kernel;
-    }
     return new_root;
   }
 };
 
 namespace irpass::analysis {
-std::unique_ptr<IRNode> clone(IRNode *root, Kernel *kernel) {
-  return IRCloner::run(root, kernel);
+std::unique_ptr<IRNode> clone(IRNode *root) {
+  return IRCloner::run(root);
+}
+
+std::unique_ptr<Stmt> clone(Stmt *root) {
+  auto ret = IRCloner::run(root);
+  Stmt *stmt_ptr = dynamic_cast<Stmt *>(ret.release());
+  TI_ASSERT(stmt_ptr != nullptr);
+
+  return std::unique_ptr<Stmt>(stmt_ptr);
 }
 }  // namespace irpass::analysis
 
-TLANG_NAMESPACE_END
+}  // namespace taichi::lang

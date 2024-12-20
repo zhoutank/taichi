@@ -1,22 +1,19 @@
 #include "gtest/gtest.h"
 
-#include "taichi/ir/frontend.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/statements.h"
-#include "taichi/util/testing.h"
 
-namespace taichi {
-namespace lang {
+namespace taichi::lang {
 
 TEST(SameStatements, TestSameBlock) {
   auto block = std::make_unique<Block>();
 
-  auto global_load_addr = block->push_back<GlobalTemporaryStmt>(
-      0, TypeFactory::create_vector_or_scalar_type(1, PrimitiveType::i32));
+  auto global_load_addr =
+      block->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32);
   auto global_load = block->push_back<GlobalLoadStmt>(global_load_addr);
-  auto global_store_addr = block->push_back<GlobalTemporaryStmt>(
-      4, TypeFactory::create_vector_or_scalar_type(1, PrimitiveType::i32));
+  auto global_store_addr =
+      block->push_back<GlobalTemporaryStmt>(4, PrimitiveType::i32);
   auto one = block->push_back<ConstStmt>(TypedConstant(1));
   auto if_stmt = block->push_back<IfStmt>(one)->as<IfStmt>();
 
@@ -94,7 +91,7 @@ TEST(SameStatements, TestSameSnodeLookup) {
   auto block = std::make_unique<Block>();
 
   auto get_root = block->push_back<GetRootStmt>();
-  auto zero = block->push_back<ConstStmt>(LaneAttribute<TypedConstant>(0));
+  auto zero = block->push_back<ConstStmt>(TypedConstant(0));
   SNode root(0, SNodeType::root);
   auto &child = root.insert_children(SNodeType::dense);
   auto lookup1 =
@@ -158,7 +155,7 @@ TEST(SameStatements, TestSameLoopIndex) {
   auto range_for =
       block
           ->push_back<RangeForStmt>(zero, four, std::make_unique<Block>(), 1, 1,
-                                    1, 1, false)
+                                    1, false)
           ->as<RangeForStmt>();
   auto loop_index_a = range_for->body->push_back<LoopIndexStmt>(range_for, 0);
   auto loop_index_b = range_for->body->push_back<LoopIndexStmt>(range_for, 0);
@@ -170,5 +167,4 @@ TEST(SameStatements, TestSameLoopIndex) {
   EXPECT_TRUE(irpass::analysis::same_value(loop_index_a, loop_index_b));
 }
 
-}  // namespace lang
-}  // namespace taichi
+}  // namespace taichi::lang
