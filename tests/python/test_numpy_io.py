@@ -1,9 +1,10 @@
 import numpy as np
 
 import taichi as ti
+from tests import test_utils
 
 
-@ti.test()
+@test_utils.test()
 def test_to_numpy_2d():
     val = ti.field(ti.i32)
 
@@ -24,7 +25,7 @@ def test_to_numpy_2d():
             assert arr[i, j] == i + j * 3
 
 
-@ti.test()
+@test_utils.test()
 def test_from_numpy_2d():
     val = ti.field(ti.i32)
 
@@ -46,10 +47,10 @@ def test_from_numpy_2d():
             assert val[i, j] == i + j * 3
 
 
-@ti.test()
+@test_utils.test()
 def test_to_numpy_struct():
     n = 16
-    f = ti.Struct.field({"a": ti.i32, "b": ti.f32}, shape=(n, ))
+    f = ti.Struct.field({"a": ti.i32, "b": ti.f32}, shape=(n,))
 
     for i in range(n):
         f[i].a = i
@@ -62,10 +63,10 @@ def test_to_numpy_struct():
         assert arr_dict["b"][i] == i * 2
 
 
-@ti.test()
+@test_utils.test()
 def test_from_numpy_struct():
     n = 16
-    f = ti.Struct.field({"a": ti.i32, "b": ti.f32}, shape=(n, ))
+    f = ti.Struct.field({"a": ti.i32, "b": ti.f32}, shape=(n,))
 
     arr_dict = {
         "a": np.arange(n, dtype=np.int32),
@@ -79,7 +80,7 @@ def test_from_numpy_struct():
         assert f[i].b == i * 2
 
 
-@ti.test(require=ti.extension.data64)
+@test_utils.test(require=ti.extension.data64)
 def test_f64():
     val = ti.field(ti.f64)
 
@@ -99,7 +100,7 @@ def test_f64():
             assert val[i, j] == (i + j * 3) * 2e100
 
 
-@ti.test()
+@test_utils.test()
 def test_matrix():
     n = 4
     m = 7
@@ -117,7 +118,7 @@ def test_matrix():
     assert (nparr == new_nparr).all()
 
 
-@ti.test()
+@test_utils.test()
 def test_numpy_io_example():
     n = 4
     m = 7
@@ -159,3 +160,20 @@ def test_numpy_io_example():
     assert arr.shape == (n, m, 3, 4)
 
     # For PyTorch tensors, use to_torch/from_torch instead
+
+
+@test_utils.test()
+def test_from_numpy_non_contiguous():
+    n = 9
+    m = 7
+    p = 4
+    arr = np.ones(shape=(n, m, p, p), dtype=np.int32)
+
+    val = ti.field(ti.i32, shape=(2, 2))
+    val.from_numpy(arr[0:6:3, 0:6:3, 0, 0])
+
+    vec = ti.Vector.field(3, dtype=ti.i32, shape=(2, 2))
+    vec.from_numpy(arr[0:6:3, 0:6:3, 0:3, 0])
+
+    mat = ti.Matrix.field(3, 4, dtype=ti.i32, shape=(2, 2))
+    mat.from_numpy(arr[0:6:3, 0:6:3, 0:3, 0:4])

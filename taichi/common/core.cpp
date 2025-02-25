@@ -4,9 +4,12 @@
 *******************************************************************************/
 
 #include "taichi/common/core.h"
-
 #include "taichi/common/version.h"
 #include "taichi/common/commit_hash.h"
+
+#include <spdlog/fmt/fmt.h>
+#include <cstdlib>
+#include "taichi/common/logging.h"
 
 #if defined(TI_PLATFORM_WINDOWS)
 #include "taichi/platform/windows/windows.h"
@@ -15,7 +18,7 @@
 #include <unistd.h>
 #endif
 
-TI_NAMESPACE_BEGIN
+namespace taichi {
 
 std::string python_package_dir;
 
@@ -28,13 +31,28 @@ void set_python_package_dir(const std::string &dir) {
 }
 
 std::string get_repo_dir() {
-  // release mode. Use ~/.taichi as root
 #if defined(TI_PLATFORM_WINDOWS)
   return "C:/taichi_cache/";
+#elif defined(TI_PLATFORM_ANDROID)
+  // @FIXME: Not supported on Android. A possibility would be to return the
+  // application cache directory. This feature is not used yet on this OS so
+  // it should not break anything (yet!)
+  return "";
 #else
-  auto home = std::getenv("HOME");
-  TI_ASSERT(home != nullptr);
-  return std::string(home) + "/.taichi/";
+  auto xdg_cache = std::getenv("XDG_CACHE_HOME");
+
+  std::string xdg_cache_str;
+  if (xdg_cache != nullptr) {
+    xdg_cache_str = xdg_cache;
+  } else {
+    // XDG_CACHE_HOME is not defined, defaulting to ~/.cache
+    auto home = std::getenv("HOME");
+    TI_ASSERT(home != nullptr);
+    xdg_cache_str = home;
+    xdg_cache_str += "/.cache";
+  }
+
+  return xdg_cache_str + "/taichi/";
 #endif
 }
 
@@ -87,4 +105,4 @@ int PID::get_parent_pid() {
 #endif
 }
 
-TI_NAMESPACE_END
+}  // namespace taichi

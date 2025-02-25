@@ -15,7 +15,8 @@
 #include <mutex>
 #include "spdlog/fmt/bundled/color.h"
 
-#if defined(__APPLE__) || (defined(__unix__) && !defined(__linux__))
+#if defined(__APPLE__) || \
+    (defined(__unix__) && !defined(__linux__)) && !defined(ANDROID)
 #include <execinfo.h>
 #include <cxxabi.h>
 #endif
@@ -91,7 +92,7 @@ inline std::vector<StackFrame> stack_trace() {
   HANDLE thread = GetCurrentThread();
 
   if (SymInitialize(process, NULL, TRUE) == FALSE) {
-    trace(__FUNCTION__ ": Failed to call SymInitialize.");
+    trace("Failed to call SymInitialize.");
     return std::vector<StackFrame>();
   }
 
@@ -149,15 +150,14 @@ inline std::vector<StackFrame> stack_trace() {
 #endif
     char symbolBuffer[sizeof(IMAGEHLP_SYMBOL) + 255];
     PIMAGEHLP_SYMBOL symbol = (PIMAGEHLP_SYMBOL)symbolBuffer;
-    symbol->SizeOfStruct = (sizeof IMAGEHLP_SYMBOL) + 255;
+    symbol->SizeOfStruct = sizeof(IMAGEHLP_SYMBOL) + 255;
     symbol->MaxNameLength = 254;
 
     if (SymGetSymFromAddr(process, frame.AddrPC.Offset, &offset, symbol)) {
       f.name = symbol->Name;
     } else {
       DWORD error = GetLastError();
-      trace(__FUNCTION__ ": Failed to resolve address 0x%X: %u\n",
-            frame.AddrPC.Offset, error);
+      trace("Failed to resolve address 0x%X: %u\n", frame.AddrPC.Offset, error);
       f.name = "Unknown Function";
     }
 
@@ -170,8 +170,8 @@ inline std::vector<StackFrame> stack_trace() {
       f.line = line.LineNumber;
     } else {
       DWORD error = GetLastError();
-      trace(__FUNCTION__ ": Failed to resolve line for 0x%X: %u\n",
-            frame.AddrPC.Offset, error);
+      trace("Failed to resolve line for 0x%X: %u\n", frame.AddrPC.Offset,
+            error);
       f.line = 0;
     }
 
@@ -187,7 +187,7 @@ inline std::vector<StackFrame> stack_trace() {
 }
 }  // namespace dbg
 #endif
-#ifdef __linux__
+#if defined(__linux__) && !defined(ANDROID)
 #include <execinfo.h>
 #include <signal.h>
 #include <ucontext.h>
@@ -195,9 +195,9 @@ inline std::vector<StackFrame> stack_trace() {
 #include <cxxabi.h>
 #endif
 
-TI_NAMESPACE_BEGIN
+namespace taichi {
 
-TI_EXPORT void print_traceback() {
+void print_traceback() {
 #ifdef __APPLE__
   static std::mutex traceback_printer_mutex;
   // Modified based on
@@ -205,7 +205,7 @@ TI_EXPORT void print_traceback() {
   // TODO: print line number instead of offset
   // (https://stackoverflow.com/questions/8278691/how-to-fix-backtrace-line-number-error-in-c)
 
-  // record stack trace upto 128 frames
+  // record stack trace up to 128 frames
   void *callstack[128] = {};
   // collect stack frames
   int frames = backtrace((void **)callstack, 128);
@@ -302,6 +302,12 @@ TI_EXPORT void print_traceback() {
     fmt::print(fg(fmt::color::magenta),
                fmt::format(" in {}\n", stack[i].module));
   }
+#elif defined(ANDROID)
+  // Not supported
+  fmt::print(fg(fmt::color::magenta), "***********************************\n");
+  fmt::print(fg(fmt::color::magenta), "* Taichi Compiler Stack Traceback *\n");
+  fmt::print(fg(fmt::color::magenta), "***********************************\n");
+  fmt::print(fg(fmt::color::magenta), "NOT SUPPORTED ON ANDROID\n");
 #else
   // Based on http://man7.org/linux/man-pages/man3/backtrace.3.html
   constexpr int BT_BUF_SIZE = 1024;
@@ -337,7 +343,8 @@ TI_EXPORT void print_traceback() {
 
       int status = -1;
 
-      demangled_name_ = abi::__cxa_demangle(name.c_str(), NULL, NULL, &status);
+      demangled_name_ =
+          abi::__cxa_demangle(name.c_str(), nullptr, nullptr, &status);
 
       if (demangled_name_) {
         name = std::string(demangled_name_);
@@ -358,7 +365,7 @@ TI_EXPORT void print_traceback() {
   fmt::print(
       fg(fmt::color::orange),
       "\nInternal error occurred. Check out this page for possible solutions:\n"
-      "https://docs.taichi.graphics/lang/articles/misc/install\n");
+      "https://docs.taichi-lang.org/docs/install\n");
 }
 
-TI_NAMESPACE_END
+}  // namespace taichi

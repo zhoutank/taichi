@@ -1,7 +1,8 @@
 import taichi as ti
+from tests import test_utils
 
 
-@ti.test()
+@test_utils.test()
 def test_singleton():
     x = ti.field(ti.i32, shape=())
 
@@ -15,7 +16,7 @@ def test_singleton():
     assert x[None] == 3
 
 
-@ti.test()
+@test_utils.test()
 def test_singleton2():
     x = ti.field(ti.i32)
 
@@ -31,7 +32,7 @@ def test_singleton2():
     assert x[None] == 3
 
 
-@ti.test()
+@test_utils.test()
 def test_linear():
     x = ti.field(ti.i32)
     y = ti.field(ti.i32)
@@ -54,7 +55,7 @@ def test_linear():
         assert y[i] == i * 2
 
 
-@ti.test()
+@test_utils.test()
 def test_nested():
     x = ti.field(ti.i32)
     y = ti.field(ti.i32)
@@ -77,16 +78,14 @@ def test_nested():
         assert y[i] == i * 2
 
 
-@ti.test()
+@test_utils.test()
 def test_nested2():
     x = ti.field(ti.i32)
     y = ti.field(ti.i32)
 
     n = 2048
 
-    ti.root.dense(ti.i, n // 512).dense(ti.i, 16).dense(ti.i,
-                                                        8).dense(ti.i,
-                                                                 4).place(x)
+    ti.root.dense(ti.i, n // 512).dense(ti.i, 16).dense(ti.i, 8).dense(ti.i, 4).place(x)
     ti.root.dense(ti.i, n).place(y)
 
     @ti.kernel
@@ -102,7 +101,7 @@ def test_nested2():
         assert y[i] == i * 2
 
 
-@ti.test()
+@test_utils.test()
 def test_2d():
     x = ti.field(ti.i32)
     y = ti.field(ti.i32)
@@ -123,7 +122,7 @@ def test_2d():
             assert x[i, j] == i + j * 2
 
 
-@ti.test()
+@test_utils.test()
 def test_2d_non_POT():
     x = ti.field(ti.i32)
     y = ti.field(ti.i32, shape=())
@@ -146,7 +145,7 @@ def test_2d_non_POT():
     assert y[None] == tot
 
 
-@ti.test()
+@test_utils.test()
 def test_nested_2d():
     x = ti.field(ti.i32)
     y = ti.field(ti.i32)
@@ -167,17 +166,14 @@ def test_nested_2d():
             assert x[i, j] == i + j * 2
 
 
-@ti.test()
+@test_utils.test()
 def test_nested_2d_more_nests():
     x = ti.field(ti.i32)
     y = ti.field(ti.i32)
 
     n = 64
 
-    ti.root.dense(ti.ij, n // 16).dense(ti.ij,
-                                        2).dense(ti.ij,
-                                                 4).dense(ti.ij,
-                                                          2).place(x, y)
+    ti.root.dense(ti.ij, n // 16).dense(ti.ij, 2).dense(ti.ij, 4).dense(ti.ij, 2).place(x, y)
 
     @ti.kernel
     def fill():
@@ -191,7 +187,7 @@ def test_nested_2d_more_nests():
             assert x[i, j] == i + j * 2
 
 
-@ti.test()
+@test_utils.test()
 def test_linear_k():
     x = ti.field(ti.i32)
 
@@ -210,7 +206,7 @@ def test_linear_k():
         assert x[i] == i
 
 
-@ti.test(require=ti.extension.sparse)
+@test_utils.test(require=ti.extension.sparse)
 def test_struct_for_branching():
     # Related issue: https://github.com/taichi-dev/taichi/issues/704
     x = ti.field(dtype=ti.i32)
@@ -240,7 +236,7 @@ def test_struct_for_branching():
     func3()
 
 
-@ti.test(require=ti.extension.sparse)
+@test_utils.test(require=ti.extension.sparse)
 def test_struct_for_pointer_block():
     n = 16
     block_size = 8
@@ -262,14 +258,16 @@ def test_struct_for_pointer_block():
     assert count() == 1
 
 
-@ti.test(require=ti.extension.quant)
+@test_utils.test(require=ti.extension.quant)
 def test_struct_for_quant():
     n = 8
 
-    ci13 = ti.quant.int(13, True)
-    x = ti.field(dtype=ci13)
+    qi13 = ti.types.quant.int(13, True)
+    x = ti.field(dtype=qi13)
 
-    ti.root.dense(ti.i, n).bit_struct(num_bits=32).place(x)
+    bitpack = ti.BitpackedFields(max_num_bits=32)
+    bitpack.place(x)
+    ti.root.dense(ti.i, n).place(bitpack)
 
     @ti.kernel
     def count() -> int:
@@ -281,7 +279,7 @@ def test_struct_for_quant():
     assert count() == 28
 
 
-@ti.test(require=ti.extension.sparse)
+@test_utils.test(require=ti.extension.sparse)
 def test_struct_for_continue():
     # Related issue: https://github.com/taichi-dev/taichi/issues/3272
     x = ti.field(dtype=ti.i32)
@@ -297,7 +295,8 @@ def test_struct_for_continue():
     def struct_for_continue() -> ti.i32:
         cnt = 0
         for i in x:
-            if x[i]: continue
+            if x[i]:
+                continue
             cnt += 1
         return cnt
 
@@ -305,7 +304,8 @@ def test_struct_for_continue():
     def range_for_continue() -> ti.i32:
         cnt = 0
         for i in range(n * n):
-            if x[i]: continue
+            if x[i]:
+                continue
             cnt += 1
         return cnt
 

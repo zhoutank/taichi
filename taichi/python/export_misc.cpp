@@ -3,9 +3,9 @@
     The use of this software is governed by the LICENSE file.
 *******************************************************************************/
 
-#include "taichi/backends/metal/api.h"
-#include "taichi/backends/opengl/opengl_api.h"
-#include "taichi/backends/vulkan/runtime.h"
+#include "taichi/rhi/metal/metal_api.h"
+#include "taichi/runtime/gfx/runtime.h"
+#include "taichi/rhi/dx/dx_api.h"
 #include "taichi/common/core.h"
 #include "taichi/common/interface.h"
 #include "taichi/common/task.h"
@@ -16,33 +16,31 @@
 #include "taichi/python/export.h"
 #include "taichi/python/memory_usage_monitor.h"
 #include "taichi/system/benchmark.h"
-#include "taichi/system/dynamic_loader.h"
+#include "taichi/system/hacked_signal_handler.h"
 #include "taichi/system/profiler.h"
-#include "taichi/util/statistics.h"
+#include "taichi/util/offline_cache.h"
 #if defined(TI_WITH_CUDA)
-#include "taichi/backends/cuda/cuda_driver.h"
+#include "taichi/rhi/cuda/cuda_driver.h"
+#endif
+
+#include "taichi/platform/amdgpu/detect_amdgpu.h"
+#if defined(TI_WITH_AMDGPU)
+#include "taichi/rhi/amdgpu/amdgpu_driver.h"
 #endif
 
 #ifdef TI_WITH_VULKAN
-#include "taichi/backends/vulkan/loader.h"
+#include "taichi/rhi/vulkan/vulkan_loader.h"
 #endif
 
-#ifdef TI_WITH_CC
-namespace taichi::lang::cccp {
-extern bool is_c_backend_available();
-}
+#ifdef TI_WITH_OPENGL
+#include "taichi/rhi/opengl/opengl_api.h"
 #endif
 
-TI_NAMESPACE_BEGIN
+#ifdef TI_WITH_DX12
+#include "taichi/rhi/dx12/dx12_api.h"
+#endif
 
-Config config_from_py_dict(py::dict &c) {
-  Config config;
-  for (auto item : c) {
-    config.set(std::string(py::str(item.first)),
-               std::string(py::str(item.second)));
-  }
-  return config;
-}
+namespace taichi {
 
 void test_raise_error() {
   raise_assertion_failure_in_python("Just a test.");
@@ -69,29 +67,8 @@ void print_all_units() {
   std::cout << all_units << " units in all." << std::endl;
 }
 
-void duplicate_stdout_to_file(const std::string &fn) {
-/*
-static int stdout_fd = -1;
-int fd[2];
-pipe(fd);
-stdout = fdopen(fd[1], "w");
-auto file_fd = fdopen(fd[0], "w");
-FILE *file = freopen(fn.c_str(), "w", file_fd);
-*/
-#if defined(TI_PLATFORM_UNIX)
-  std::cerr.rdbuf(std::cout.rdbuf());
-  dup2(fileno(popen(fmt::format("tee {}", fn).c_str(), "w")), STDOUT_FILENO);
-#else
-  TI_NOT_IMPLEMENTED;
-#endif
-}
-
-void stop_duplicating_stdout_to_file(const std::string &fn) {
-  TI_NOT_IMPLEMENTED;
-}
-
 void export_misc(py::module &m) {
-  py::class_<Config>(m, "Config");
+  py::class_<Config>(m, "Config");  // NOLINT(bugprone-unused-raii)
   py::register_exception_translator([](std::exception_ptr p) {
     try {
       if (p)
@@ -126,8 +103,6 @@ void export_misc(py::module &m) {
   TI_EXPORT_LOGGING(error);
   TI_EXPORT_LOGGING(critical);
 
-  m.def("duplicate_stdout_to_file", duplicate_stdout_to_file);
-
   m.def("print_all_units", print_all_units);
   m.def("set_core_state_python_imported", CoreState::set_python_imported);
   m.def("set_logging_level", [](const std::string &level) {
@@ -141,7 +116,6 @@ void export_misc(py::module &m) {
   m.def("set_core_trigger_gdb_when_crash",
         CoreState::set_trigger_gdb_when_crash);
   m.def("test_raise_error", test_raise_error);
-  m.def("config_from_dict", config_from_py_dict);
   m.def("get_default_float_size", []() { return sizeof(real); });
   m.def("trigger_sig_fpe", []() {
     int a = 2;
@@ -168,27 +142,40 @@ void export_misc(py::module &m) {
   m.def("pop_python_print_buffer", []() { return py_cout.pop_content(); });
   m.def("toggle_python_print_buffer", [](bool opt) { py_cout.enabled = opt; });
   m.def("with_cuda", is_cuda_api_available);
+  m.def("with_amdgpu", is_rocm_api_available);
+#ifdef TI_WITH_METAL
   m.def("with_metal", taichi::lang::metal::is_metal_api_available);
-  m.def("with_opengl", taichi::lang::opengl::is_opengl_api_available);
+#else
+  m.def("with_metal", []() { return false; });
+#endif
+#ifdef TI_WITH_OPENGL
+  m.def("with_opengl", taichi::lang::opengl::is_opengl_api_available,
+        py::arg("use_gles") = false);
+#else
+  m.def("with_opengl", [](bool use_gles) { return false; });
+#endif
 #ifdef TI_WITH_VULKAN
   m.def("with_vulkan", taichi::lang::vulkan::is_vulkan_api_available);
+  m.def("set_vulkan_visible_device",
+        taichi::lang::vulkan::set_vulkan_visible_device);
 #else
   m.def("with_vulkan", []() { return false; });
 #endif
-
-#ifdef TI_WITH_CC
-  m.def("with_cc", taichi::lang::cccp::is_c_backend_available);
+#ifdef TI_WITH_DX11
+  m.def("with_dx11", taichi::lang::directx11::is_dx_api_available);
 #else
-  m.def("with_cc", []() { return false; });
+  m.def("with_dx11", []() { return false; });
+#endif
+#ifdef TI_WITH_DX12
+  m.def("with_dx12", taichi::lang::directx12::is_dx12_api_available);
+#else
+  m.def("with_dx12", []() { return false; });
 #endif
 
-  py::class_<Statistics>(m, "Statistics")
-      .def(py::init<>())
-      .def("clear", &Statistics::clear)
-      .def("get_counters", &Statistics::get_counters);
-  m.def(
-      "get_kernel_stats", []() -> Statistics & { return stat; },
-      py::return_value_policy::reference);
+  m.def("clean_offline_cache_files",
+        lang::offline_cache::clean_offline_cache_files);
+
+  py::class_<HackedSignalRegister>(m, "HackedSignalRegister").def(py::init<>());
 }
 
-TI_NAMESPACE_END
+}  // namespace taichi

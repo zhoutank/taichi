@@ -1,6 +1,7 @@
 #include "taichi/system/profiler.h"
+#include "spdlog/fmt/bundled/color.h"
 
-TI_NAMESPACE_BEGIN
+namespace taichi {
 
 // A profiler's records form a tree structure
 struct ProfilerRecordNode {
@@ -61,7 +62,7 @@ class ProfilerRecords {
   int current_depth;
   bool enabled;
 
-  ProfilerRecords(const std::string &name) {
+  explicit ProfilerRecords(const std::string &name) {
     root = std::make_unique<ProfilerRecordNode>(
         fmt::format("[Profiler {}]", name), nullptr);
     current_node = root.get();
@@ -213,19 +214,19 @@ void ProfilerRecords::print(ProfilerRecordNode *node, int depth) {
 }
 
 ScopedProfiler::ScopedProfiler(std::string name, uint64 elements) {
-  start_time = Time::get_time();
-  this->name = name;
-  this->elements = elements;
-  stopped = false;
+  start_time_ = Time::get_time();
+  this->name_ = name;
+  this->elements_ = elements;
+  stopped_ = false;
   ProfilerRecords::get_this_thread_instance().push(name);
 }
 
 void ScopedProfiler::stop() {
-  TI_ASSERT_INFO(!stopped, "Profiler already stopped.");
-  float64 elapsed = Time::get_time() - start_time;
-  if ((int64)elements != -1) {
+  TI_ASSERT_INFO(!stopped_, "Profiler already stopped.");
+  float64 elapsed = Time::get_time() - start_time_;
+  if ((int64)elements_ != -1) {
     ProfilerRecords::get_this_thread_instance().insert_sample(elapsed,
-                                                              elements);
+                                                              elements_);
   } else {
     ProfilerRecords::get_this_thread_instance().insert_sample(elapsed);
   }
@@ -241,7 +242,7 @@ void ScopedProfiler::enable() {
 }
 
 ScopedProfiler::~ScopedProfiler() {
-  if (!stopped) {
+  if (!stopped_) {
     stop();
   }
 }
@@ -252,29 +253,29 @@ Profiling &Profiling::get_instance() {
 }
 
 ProfilerRecords *Profiling::get_this_thread_profiler() {
-  std::lock_guard<std::mutex> _(mut);
+  std::lock_guard<std::mutex> _(mut_);
   auto id = std::this_thread::get_id();
   std::stringstream ss;
   ss << id;
-  if (profilers.find(id) == profilers.end()) {
+  if (profilers_.find(id) == profilers_.end()) {
     // Note: thread id may be reused
-    profilers[id] = new ProfilerRecords(fmt::format("thread {}", ss.str()));
+    profilers_[id] = new ProfilerRecords(fmt::format("thread {}", ss.str()));
   }
-  return profilers[id];
+  return profilers_[id];
 }
 
 void Profiling::print_profile_info() {
-  std::lock_guard<std::mutex> _(mut);
-  for (auto p : profilers) {
+  std::lock_guard<std::mutex> _(mut_);
+  for (auto p : profilers_) {
     p.second->print();
   }
 }
 
 void Profiling::clear_profile_info() {
-  std::lock_guard<std::mutex> _(mut);
-  for (auto p : profilers) {
+  std::lock_guard<std::mutex> _(mut_);
+  for (auto p : profilers_) {
     p.second->clear();
   }
 }
 
-TI_NAMESPACE_END
+}  // namespace taichi

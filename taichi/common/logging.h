@@ -112,18 +112,22 @@ class logger;
 
 #define TI_LOG_SET_PATTERN(x) spdlog::set_pattern(x);
 
-#define TI_FLUSH_LOGGER \
-  { taichi::Logger::get_instance().flush(); };
+#define TI_FLUSH_LOGGER                     \
+  {                                         \
+    taichi::Logger::get_instance().flush(); \
+  };
 
-#define TI_P(x) \
-  { TI_INFO("{}", taichi::TextSerializer::serialize(#x, (x))); }
+#define TI_P(x)                                                \
+  {                                                            \
+    TI_INFO("{}", taichi::TextSerializer::serialize(#x, (x))); \
+  }
 
 namespace taichi {
 
-class Logger {
+class TI_DLL_EXPORT Logger {
  private:
-  std::shared_ptr<spdlog::logger> console;
-  int level;
+  std::shared_ptr<spdlog::logger> console_;
+  int level_;
   std::function<void()> print_stacktrace_fn_;
 
   Logger();

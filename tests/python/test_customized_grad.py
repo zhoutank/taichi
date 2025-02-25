@@ -1,7 +1,10 @@
+import pytest
+
 import taichi as ti
+from tests import test_utils
 
 
-@ti.test()
+@test_utils.test()
 def test_customized_kernels_tape():
     x = ti.field(ti.f32)
     total = ti.field(ti.f32)
@@ -26,12 +29,12 @@ def test_customized_kernels_tape():
     def backward(mul):
         func.grad(mul)
 
-    with ti.Tape(loss=total):
+    with ti.ad.Tape(loss=total):
         forward(4)
     assert x.grad[0] == 4
 
 
-@ti.test()
+@test_utils.test()
 def test_customized_kernels_grad():
     x = ti.field(ti.f32)
     total = ti.field(ti.f32)
@@ -62,7 +65,7 @@ def test_customized_kernels_grad():
     assert x.grad[0] == 4
 
 
-@ti.test()
+@test_utils.test()
 def test_customized_kernels_indirect():
     x = ti.field(ti.f32)
     total = ti.field(ti.f32)
@@ -90,12 +93,12 @@ def test_customized_kernels_indirect():
     def backward(mul):
         func.grad(mul)
 
-    with ti.Tape(loss=total):
+    with ti.ad.Tape(loss=total):
         forward(4)
     assert x.grad[0] == 4
 
 
-@ti.test()
+@test_utils.test()
 def test_customized_kernels_oop():
     @ti.data_oriented
     class A:
@@ -125,12 +128,12 @@ def test_customized_kernels_oop():
 
     ti.root.lazy_grad()
 
-    with ti.Tape(loss=a.total):
+    with ti.ad.Tape(loss=a.total):
         a.forward(4)
     assert a.x.grad[0] == 4
 
 
-@ti.test()
+@test_utils.test()
 def test_customized_kernels_oop2():
     @ti.data_oriented
     class A:
@@ -163,13 +166,12 @@ def test_customized_kernels_oop2():
 
     ti.root.lazy_grad()
 
-    with ti.Tape(loss=a.total):
+    with ti.ad.Tape(loss=a.total):
         a.forward(4)
     assert a.x.grad[0] == 4
 
 
-@ti.test()
-@ti.must_throw(RuntimeError)
+@test_utils.test()
 def test_decorated_primal_is_taichi_kernel():
     x = ti.field(ti.f32)
     total = ti.field(ti.f32)
@@ -185,16 +187,17 @@ def test_decorated_primal_is_taichi_kernel():
         for i in range(n):
             ti.atomic_add(total[None], x[i] * mul)
 
-    @ti.ad.grad_for(func)
-    def backward(mul):
-        func.grad(mul)
+    with pytest.raises(RuntimeError):
 
-    with ti.Tape(loss=total):
+        @ti.ad.grad_for(func)
+        def backward(mul):
+            func.grad(mul)
+
+    with ti.ad.Tape(loss=total):
         func(4)
 
 
-@ti.test()
-@ti.must_throw(RuntimeError)
+@test_utils.test()
 def test_decorated_primal_missing_decorator():
     x = ti.field(ti.f32)
     total = ti.field(ti.f32)
@@ -210,13 +213,69 @@ def test_decorated_primal_missing_decorator():
         for i in range(n):
             ti.atomic_add(total[None], x[i] * mul)
 
-    def foward(mul):
+    def forward(mul):
         func(mul)
         func(mul)
 
-    @ti.ad.grad_for(func)
-    def backward(mul):
-        func.grad(mul)
+    with pytest.raises(RuntimeError):
 
-    with ti.Tape(loss=total):
+        @ti.ad.grad_for(func)
+        def backward(mul):
+            func.grad(mul)
+
+    with ti.ad.Tape(loss=total):
         func(4)
+
+
+@test_utils.test()
+def test_customized_kernels_tape_no_grad():
+    x = ti.field(ti.f32)
+    total = ti.field(ti.f32)
+
+    n = 128
+
+    ti.root.dense(ti.i, n).place(x)
+    ti.root.place(total)
+    ti.root.lazy_grad()
+
+    @ti.kernel
+    def func(mul: ti.f32):
+        for i in range(n):
+            ti.atomic_add(total[None], x[i] * mul)
+
+    @ti.ad.no_grad
+    def forward(mul):
+        func(mul)
+        func(mul)
+
+    with ti.ad.Tape(loss=total):
+        forward(4)
+        func(5)
+    assert x.grad[0] == 5
+
+
+@test_utils.test()
+def test_customized_kernels_grad_no_grad():
+    x = ti.field(ti.f32)
+    total = ti.field(ti.f32)
+
+    n = 128
+
+    ti.root.dense(ti.i, n).place(x)
+    ti.root.place(total)
+    ti.root.lazy_grad()
+
+    @ti.kernel
+    def func(mul: ti.f32):
+        for i in range(n):
+            ti.atomic_add(total[None], x[i] * mul)
+
+    @ti.ad.no_grad
+    def forward(mul):
+        func(mul)
+        func(mul)
+
+    total.grad[None] = 1
+    forward(4)
+    forward.grad(4)
+    assert x.grad[0] == 0

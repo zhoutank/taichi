@@ -1,29 +1,38 @@
 import pytest
 
 import taichi as ti
+from tests import test_utils
 
 
-@pytest.mark.parametrize('dtype', [ti.u8, ti.u16, ti.u32])
-@ti.test(exclude=ti.opengl)
+@pytest.mark.parametrize("dtype", [ti.u8, ti.u16, ti.u32])
+@test_utils.test(exclude=[ti.opengl, ti.gles])
 def test_cast_uint_to_float(dtype):
     @ti.kernel
     def func(a: dtype) -> ti.f32:
         return ti.cast(a, ti.f32)
 
-    assert func(255) == 255
+    @ti.kernel
+    def func_sugar(a: dtype) -> ti.f32:
+        return ti.f32(a)
+
+    assert func(255) == func_sugar(255) == 255
 
 
-@pytest.mark.parametrize('dtype', [ti.u8, ti.u16, ti.u32])
-@ti.test(exclude=ti.opengl)
+@pytest.mark.parametrize("dtype", [ti.u8, ti.u16, ti.u32])
+@test_utils.test(exclude=[ti.opengl, ti.gles])
 def test_cast_float_to_uint(dtype):
     @ti.kernel
     def func(a: ti.f32) -> dtype:
         return ti.cast(a, dtype)
 
-    assert func(255) == 255
+    @ti.kernel
+    def func_sugar(a: ti.f32) -> dtype:
+        return dtype(a)
+
+    assert func(255) == func_sugar(255) == 255
 
 
-@ti.test()
+@test_utils.test()
 def test_cast_f32():
     z = ti.field(ti.i32, shape=())
 
@@ -35,7 +44,7 @@ def test_cast_f32():
     assert z[None] == 1000
 
 
-@ti.test(require=ti.extension.data64)
+@test_utils.test(require=ti.extension.data64)
 def test_cast_f64():
     z = ti.field(ti.i32, shape=())
 
@@ -47,7 +56,7 @@ def test_cast_f64():
     assert z[None] == 1000
 
 
-@pytest.mark.parametrize('dtype', [ti.f32, ti.f64])
+@pytest.mark.parametrize("dtype", [ti.f32, ti.f64])
 def test_cast_default_fp(dtype):
     ti.init(default_fp=dtype)
 
@@ -58,7 +67,7 @@ def test_cast_default_fp(dtype):
     assert func(23, 4) == pytest.approx(23.0 * 4.0)
 
 
-@pytest.mark.parametrize('dtype', [ti.i32, ti.i64])
+@pytest.mark.parametrize("dtype", [ti.i32, ti.i64])
 def test_cast_default_ip(dtype):
     ti.init(default_ip=dtype)
 
@@ -74,7 +83,7 @@ def test_cast_default_ip(dtype):
         assert func(233, large) == 233 * large
 
 
-@ti.test()
+@test_utils.test()
 def test_cast_within_while():
     ret = ti.field(ti.i32, shape=())
 
@@ -89,7 +98,7 @@ def test_cast_within_while():
     func()
 
 
-@ti.test()
+@test_utils.test()
 def test_bit_cast():
     x = ti.field(ti.i32, shape=())
     y = ti.field(ti.f32, shape=())
@@ -109,7 +118,7 @@ def test_bit_cast():
     assert z[None] == 2333
 
 
-@ti.test(arch=ti.cpu)
+@test_utils.test(arch=ti.cpu)
 def test_int_extension():
     x = ti.field(dtype=ti.i32, shape=2)
     y = ti.field(dtype=ti.u32, shape=2)
@@ -139,18 +148,20 @@ def test_int_extension():
     assert y[1] == 128
 
 
-@ti.test(arch=ti.cpu)
-def test_custom_int_extension():
+@test_utils.test(arch=ti.cpu)
+def test_quant_int_extension():
     x = ti.field(dtype=ti.i32, shape=2)
     y = ti.field(dtype=ti.u32, shape=2)
 
-    ci5 = ti.quant.int(5, True, ti.i16)
-    cu7 = ti.quant.int(7, False, ti.u16)
+    qi5 = ti.types.quant.int(5, True, ti.i16)
+    qu7 = ti.types.quant.int(7, False, ti.u16)
 
-    a = ti.field(dtype=ci5)
-    b = ti.field(dtype=cu7)
+    a = ti.field(dtype=qi5)
+    b = ti.field(dtype=qu7)
 
-    ti.root.bit_struct(num_bits=32).place(a, b)
+    bitpack = ti.BitpackedFields(max_num_bits=32)
+    bitpack.place(a, b)
+    ti.root.place(bitpack)
 
     @ti.kernel
     def run_cast_int():

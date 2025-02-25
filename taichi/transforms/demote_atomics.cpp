@@ -8,11 +8,16 @@
 #include <deque>
 #include <set>
 
-TLANG_NAMESPACE_BEGIN
+namespace taichi::lang {
 
 class DemoteAtomics : public BasicStmtVisitor {
  private:
   std::unordered_map<const SNode *, GlobalPtrStmt *> loop_unique_ptr_;
+  std::unordered_map<std::vector<int>,
+                     ExternalPtrStmt *,
+                     hashing::Hasher<std::vector<int>>>
+      loop_unique_arr_ptr_;
+  std::unordered_set<MatrixPtrStmt *> loop_unique_matrix_ptr_;
 
  public:
   using BasicStmtVisitor::visit;
@@ -20,7 +25,7 @@ class DemoteAtomics : public BasicStmtVisitor {
   OffloadedStmt *current_offloaded;
   DelayedIRModifier modifier;
 
-  DemoteAtomics() : BasicStmtVisitor() {
+  DemoteAtomics() {
     current_offloaded = nullptr;
   }
 
@@ -28,10 +33,6 @@ class DemoteAtomics : public BasicStmtVisitor {
     bool demote = false;
     bool is_local = false;
     if (current_offloaded) {
-      if (arch_is_cpu(current_offloaded->device) &&
-          current_offloaded->num_cpu_threads == 1) {
-        demote = true;
-      }
       if (stmt->dest->is<ThreadLocalPtrStmt>()) {
         demote = true;
       }
@@ -41,16 +42,31 @@ class DemoteAtomics : public BasicStmtVisitor {
       if (!demote &&
           (current_offloaded->task_type == OffloadedTaskType::range_for ||
            current_offloaded->task_type == OffloadedTaskType::mesh_for ||
-           current_offloaded->task_type == OffloadedTaskType::struct_for) &&
-          stmt->dest->is<GlobalPtrStmt>()) {
-        demote = true;
-        auto dest = stmt->dest->as<GlobalPtrStmt>();
-        for (auto snode : dest->snodes.data) {
+           current_offloaded->task_type == OffloadedTaskType::struct_for)) {
+        // Handle loop-unique GlobalPtrStmt
+        bool is_global_ptr_stmt = false;
+        GlobalPtrStmt *dest = nullptr;
+        if (stmt->dest->is<GlobalPtrStmt>()) {
+          is_global_ptr_stmt = true;
+          dest = stmt->dest->as<GlobalPtrStmt>();
+        } else if (stmt->dest->is<MatrixPtrStmt>() &&
+                   stmt->dest->as<MatrixPtrStmt>()
+                       ->origin->is<GlobalPtrStmt>()) {
+          if (loop_unique_matrix_ptr_.find(stmt->dest->as<MatrixPtrStmt>()) ==
+              loop_unique_matrix_ptr_.end()) {
+            return;
+          }
+          is_global_ptr_stmt = true;
+          dest = stmt->dest->as<MatrixPtrStmt>()->origin->as<GlobalPtrStmt>();
+        }
+
+        if (is_global_ptr_stmt) {
+          demote = true;
+          auto snode = dest->snode;
           if (loop_unique_ptr_[snode] == nullptr ||
               loop_unique_ptr_[snode]->indices.empty()) {
             // not uniquely accessed
             demote = false;
-            break;
           }
           if (current_offloaded->mem_access_opt.has_flag(
                   snode, SNodeAccessFlag::block_local) ||
@@ -58,27 +74,85 @@ class DemoteAtomics : public BasicStmtVisitor {
                   snode, SNodeAccessFlag::mesh_local)) {
             // BLS does not support write access yet so we keep atomic_adds.
             demote = false;
-            break;
           }
+          // demote from-end atomics
+          if (current_offloaded->task_type == OffloadedTaskType::mesh_for) {
+            if (dest->indices.size() == 1 &&
+                dest->indices[0]->is<MeshIndexConversionStmt>()) {
+              auto idx = dest->indices[0]->as<MeshIndexConversionStmt>()->idx;
+              while (idx->is<MeshIndexConversionStmt>()) {  // special case: l2g
+                                                            // + g2r
+                idx = idx->as<MeshIndexConversionStmt>()->idx;
+              }
+              if (idx->is<LoopIndexStmt>() &&
+                  idx->as<LoopIndexStmt>()->is_mesh_index() &&
+                  loop_unique_ptr_[dest->snode] != nullptr) {
+                demote = true;
+              }
+            }
+          }
+        }
+
+        // Handle loop-unique ExternalPtrStmt
+        bool is_external_ptr_stmt = false;
+        ExternalPtrStmt *dest_ptr = nullptr;
+        if (stmt->dest->is<ExternalPtrStmt>()) {
+          is_external_ptr_stmt = true;
+          dest_ptr = stmt->dest->as<ExternalPtrStmt>();
+        } else if (stmt->dest->is<MatrixPtrStmt>() &&
+                   stmt->dest->as<MatrixPtrStmt>()
+                       ->origin->is<ExternalPtrStmt>()) {
+          if (loop_unique_matrix_ptr_.find(stmt->dest->as<MatrixPtrStmt>()) ==
+              loop_unique_matrix_ptr_.end()) {
+            return;
+          }
+          is_external_ptr_stmt = true;
+          dest_ptr =
+              stmt->dest->as<MatrixPtrStmt>()->origin->as<ExternalPtrStmt>();
+        }
+
+        if (is_external_ptr_stmt) {
+          demote = true;
+          if (dest_ptr->indices.empty()) {
+            demote = false;
+          }
+          ArgLoadStmt *arg_load_stmt = dest_ptr->base_ptr->as<ArgLoadStmt>();
+          std::vector<int> arg_id = arg_load_stmt->arg_id;
+          if (loop_unique_arr_ptr_[arg_id] == nullptr) {
+            // Not loop unique
+            demote = false;
+          }
+          // TODO: Is BLS / Mem Access Opt a thing for any_arr?
         }
       }
     }
-    if (stmt->dest->is<AllocaStmt>() ||
-        (stmt->dest->is<PtrOffsetStmt>() &&
-         stmt->dest->cast<PtrOffsetStmt>()->origin->is<AllocaStmt>())) {
-      demote = true;
-      is_local = true;
+
+    if (stmt->dest->is<AllocaStmt>()) {
+      // Except shared array
+      if (!stmt->dest->as<AllocaStmt>()->is_shared) {
+        demote = true;
+        is_local = true;
+      }
+    }
+
+    if (stmt->dest->is<MatrixPtrStmt>() &&
+        stmt->dest->cast<MatrixPtrStmt>()->origin->is<AllocaStmt>()) {
+      // Except shared array
+      if (!stmt->dest->cast<MatrixPtrStmt>()
+               ->origin->as<AllocaStmt>()
+               ->is_shared) {
+        demote = true;
+        is_local = true;
+      }
     }
 
     if (auto dest_pointer_type = stmt->dest->ret_type->cast<PointerType>()) {
-      if (auto cft =
-              dest_pointer_type->get_pointee_type()->cast<CustomFloatType>()) {
-        if (cft->get_exponent_type()) {
-          TI_WARN(
-              "AtomicOp on CustomFloatType with exponent is not supported. "
-              "Demoting to non-atomic RMW.");
-          demote = true;
-        }
+      if (dest_pointer_type->get_pointee_type()->is<QuantFloatType>()) {
+        TI_WARN(
+            "AtomicOp on QuantFloatType is not supported. "
+            "Demoting to non-atomic RMW.\n{}",
+            stmt->get_tb());
+        demote = true;
       }
     }
 
@@ -91,8 +165,7 @@ class DemoteAtomics : public BasicStmtVisitor {
       auto new_stmts = VecStatement();
       Stmt *load;
       if (is_local) {
-        TI_ASSERT(stmt->width() == 1);
-        load = new_stmts.push_back<LocalLoadStmt>(LocalAddress(ptr, 0));
+        load = new_stmts.push_back<LocalLoadStmt>(ptr);
         auto bin = new_stmts.push_back<BinaryOpStmt>(bin_type, load, val);
         new_stmts.push_back<LocalStoreStmt>(ptr, bin);
       } else {
@@ -120,7 +193,7 @@ class DemoteAtomics : public BasicStmtVisitor {
       // value. The correct thing is to replace |stmt| $d with the loaded
       // old value $d'.
       // See also: https://github.com/taichi-dev/taichi/issues/332
-      stmt->replace_with(load);
+      stmt->replace_usages_with(load);
       modifier.replace_with(stmt, std::move(new_stmts),
                             /*replace_usages=*/false);
     }
@@ -131,8 +204,12 @@ class DemoteAtomics : public BasicStmtVisitor {
     if (stmt->task_type == OffloadedTaskType::range_for ||
         stmt->task_type == OffloadedTaskType::mesh_for ||
         stmt->task_type == OffloadedTaskType::struct_for) {
-      loop_unique_ptr_ =
+      auto uniquely_accessed_pointers =
           irpass::analysis::gather_uniquely_accessed_pointers(stmt);
+      loop_unique_ptr_ = std::move(std::get<0>(uniquely_accessed_pointers));
+      loop_unique_arr_ptr_ = std::move(std::get<1>(uniquely_accessed_pointers));
+      loop_unique_matrix_ptr_ =
+          std::move(std::get<2>(uniquely_accessed_pointers));
     }
     // We don't need to visit TLS/BLS prologues/epilogues.
     if (stmt->body) {
@@ -167,4 +244,4 @@ bool demote_atomics(IRNode *root, const CompileConfig &config) {
 
 }  // namespace irpass
 
-TLANG_NAMESPACE_END
+}  // namespace taichi::lang

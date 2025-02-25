@@ -3,21 +3,26 @@
 #include <memory>
 #include <functional>
 
-#include "taichi/llvm/llvm_fwd.h"
-#include "taichi/lang_util.h"
+#include "taichi/runtime/llvm/llvm_fwd.h"
+#include "taichi/util/lang_util.h"
 #include "taichi/jit/jit_module.h"
 
-TLANG_NAMESPACE_BEGIN
+namespace taichi::lang {
 
 // Backend JIT compiler for all archs
 
+class TaichiLLVMContext;
+struct CompileConfig;
+
 class JITSession {
  protected:
+  TaichiLLVMContext *tlctx_;
+  const CompileConfig &config_;
+
   std::vector<std::unique_ptr<JITModule>> modules;
 
  public:
-  JITSession() {
-  }
+  JITSession(TaichiLLVMContext *tlctx, const CompileConfig &config);
 
   virtual JITModule *add_module(std::unique_ptr<llvm::Module> M,
                                 int max_reg = 0) = 0;
@@ -28,16 +33,13 @@ class JITSession {
     TI_NOT_IMPLEMENTED
   }
 
-  virtual llvm::DataLayout get_data_layout();
+  virtual llvm::DataLayout get_data_layout() = 0;
 
-  std::size_t get_type_size(llvm::Type *type);
-
-  static std::unique_ptr<JITSession> create(Arch arch);
-
-  virtual void global_optimize_module(llvm::Module *module) {
-  }
+  static std::unique_ptr<JITSession> create(TaichiLLVMContext *tlctx,
+                                            const CompileConfig &config,
+                                            Arch arch);
 
   virtual ~JITSession() = default;
 };
 
-TLANG_NAMESPACE_END
+}  // namespace taichi::lang

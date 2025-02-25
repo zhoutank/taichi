@@ -7,14 +7,14 @@
 #include "taichi/common/task.h"
 #include "taichi/util/testing.h"
 
-TI_NAMESPACE_BEGIN
+namespace taichi {
 
 class RunTests : public Task {
-  virtual std::string run(const std::vector<std::string> &parameters) {
+  std::string run(const std::vector<std::string> &parameters) override {
     return std::to_string(run_tests(parameters));
   }
 };
 
 TI_IMPLEMENTATION(Task, RunTests, "test");
 
-TI_NAMESPACE_END
+}  // namespace taichi

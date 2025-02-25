@@ -1,7 +1,8 @@
 import taichi as ti
+from tests import test_utils
 
 
-@ti.test()
+@test_utils.test()
 def test_offload_order():
     n = 128
     x = ti.field(ti.f32, shape=n, needs_grad=True)
@@ -16,7 +17,7 @@ def test_offload_order():
         # for i in x:
         #     z[None] += y[i]
 
-    with ti.Tape(z):
+    with ti.ad.Tape(z):
         forward()
 
     # for i in range(n):

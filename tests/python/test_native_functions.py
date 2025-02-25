@@ -1,9 +1,11 @@
 import numpy as np
+import pytest
 
 import taichi as ti
+from tests import test_utils
 
 
-@ti.test()
+@test_utils.test(exclude=[ti.amdgpu])
 def test_abs():
     x = ti.field(ti.f32)
 
@@ -24,7 +26,7 @@ def test_abs():
         assert x[i] == i
 
 
-@ti.test()
+@test_utils.test()
 def test_int():
     x = ti.field(ti.f32)
 
@@ -47,7 +49,7 @@ def test_int():
         assert x[i] == i // 2
 
 
-@ti.test()
+@test_utils.test()
 def test_minmax():
     x = ti.field(ti.f32)
     y = ti.field(ti.f32)
@@ -74,7 +76,9 @@ def test_minmax():
 
     assert np.allclose(
         minimum.to_numpy(),
-        np.minimum(np.minimum(x.to_numpy(), y.to_numpy()), z.to_numpy()))
+        np.minimum(np.minimum(x.to_numpy(), y.to_numpy()), z.to_numpy()),
+    )
     assert np.allclose(
         maximum.to_numpy(),
-        np.maximum(np.maximum(x.to_numpy(), y.to_numpy()), z.to_numpy()))
+        np.maximum(np.maximum(x.to_numpy(), y.to_numpy()), z.to_numpy()),
+    )

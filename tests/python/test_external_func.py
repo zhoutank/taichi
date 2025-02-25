@@ -4,14 +4,16 @@ import shutil
 import tempfile
 
 import pytest
+from taichi.lang.util import has_clangpp
 
 import taichi as ti
+from tests import test_utils
 
 
-@pytest.mark.skipif(not ti.has_clangpp(), reason='Clang not installed.')
-@ti.test(arch=[ti.cpu, ti.cuda])
+@pytest.mark.skipif(not has_clangpp(), reason="Clang not installed.")
+@test_utils.test(arch=[ti.x64, ti.cuda])
 def test_source_builder_from_source():
-    source_bc = '''
+    source_bc = """
     extern "C" {
         void add_and_mul(float *a, float *b, float *c, float *d, int *e) {
             *c = (*a) + (*b);
@@ -25,8 +27,8 @@ def test_source_builder_from_source():
             *c = ret;
         }
     }
-    '''
-    sb_bc = ti.SourceBuilder.from_source(source_bc)
+    """
+    sb_bc = ti.lang.source_builder.SourceBuilder.from_source(source_bc)
 
     @ti.kernel
     def func_bc() -> ti.i32:
@@ -44,10 +46,10 @@ def test_source_builder_from_source():
     assert func_bc() == 11**8
 
 
-@pytest.mark.skipif(not ti.has_clangpp(), reason='Clang not installed.')
-@ti.test(arch=[ti.cpu, ti.cuda])
+@pytest.mark.skipif(not has_clangpp(), reason="Clang not installed.")
+@test_utils.test(arch=[ti.x64, ti.cuda])
 def test_source_builder_from_file():
-    source_code = '''
+    source_code = """
     extern "C" {
         void add_and_mul(float *a, float *b, float *c, float *d, int *e) {
             *c = (*a) + (*b);
@@ -61,13 +63,13 @@ def test_source_builder_from_file():
             *c = ret;
         }
     }
-    '''
+    """
 
     td = tempfile.mkdtemp()
-    fn = os.path.join(td, 'source.cpp')
-    with open(fn, 'w') as f:
+    fn = os.path.join(td, "source.cpp")
+    with open(fn, "w") as f:
         f.write(source_code)
-    sb_bc = ti.SourceBuilder.from_file(fn)
+    sb_bc = ti.lang.source_builder.SourceBuilder.from_file(fn)
 
     @ti.kernel
     def func_bc() -> ti.i32:
